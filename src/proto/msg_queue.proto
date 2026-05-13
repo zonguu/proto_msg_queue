@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package pmqueue;
+
+// 消息类型枚举
+enum MessageType {
+    UNKNOWN = 0;
+    PUBLISH = 1;       // 发布消息
+    SUBSCRIBE = 2;     // 订阅主题
+    UNSUBSCRIBE = 3;   // 取消订阅
+    PULL = 4;          // 拉取消息
+    ACK = 5;           // 确认消费
+    RESPONSE = 6;      // 通用响应
+    PUSH = 7;          // 服务端推送
+}
+
+// 发布消息
+message PublishRequest {
+    string topic = 1;
+    bytes payload = 2;
+}
+
+// 订阅请求
+message SubscribeRequest {
+    string topic = 1;
+    string subscriber_id = 2;
+}
+
+// 取消订阅请求
+message UnsubscribeRequest {
+    string topic = 1;
+    string subscriber_id = 2;
+}
+
+// 拉取消息请求
+message PullRequest {
+    string topic = 1;
+    string subscriber_id = 2;
+    uint32 max_messages = 3;
+}
+
+// 确认消费
+message AckRequest {
+    string topic = 1;
+    string subscriber_id = 2;
+    uint64 message_id = 3;
+}
+
+// 通用响应
+message Response {
+    bool success = 1;
+    string error_msg = 2;
+    uint64 message_id = 3;
+}
+
+// 推送消息（服务端 -> 客户端）
+message PushMessage {
+    uint64 message_id = 1;
+    string topic = 2;
+    bytes payload = 3;
+    uint64 timestamp = 4;
+}
+
+// 通用消息包装
+message Message {
+    MessageType type = 1;
+    oneof body {
+        PublishRequest publish = 2;
+        SubscribeRequest subscribe = 3;
+        UnsubscribeRequest unsubscribe = 4;
+        PullRequest pull = 5;
+        AckRequest ack = 6;
+        Response response = 7;
+        PushMessage push = 8;
+    }
+}
