@@ -1,20 +1,50 @@
 #include "storage/memory_message_store.h"
 
-#include <chrono>
 #include <cstring>
+#include <iostream>
 
 namespace pmqueue {
 
-MemoryMessageStore::MemoryMessageStore(size_t default_buffer_size)
-    : default_buffer_size_(default_buffer_size) {}
+// ============================================================================
+// 构造函数 / 析构函数
+// ============================================================================
+
+MemoryMessageStore::MemoryMessageStore(
+    size_t default_buffer_size,
+    uint32_t max_retry_count,
+    uint32_t pending_timeout_ms,
+    uint32_t retry_interval_ms)
+    : default_buffer_size_(default_buffer_size)
+    , max_retry_count_(max_retry_count)
+    , pending_timeout_ms_(pending_timeout_ms)
+    , retry_interval_ms_(retry_interval_ms)
+{
+    // 启动后台重试线程
+    retry_thread_ = std::thread(&MemoryMessageStore::RetryLoop, this);
+}
+
+MemoryMessageStore::~MemoryMessageStore() {
+    {
+        std::lock_guard<std::mutex> lock(retry_mutex_);
+        stop_retry_thread_ = true;
+    }
+    retry_cv_.notify_all();
+    if (retry_thread_.joinable()) {
+        retry_thread_.join();
+    }
+}
+
+// ============================================================================
+// Topic 管理
+// ============================================================================
 
 bool MemoryMessageStore::CreateTopic(const TopicName& topic) {
     std::lock_guard<std::mutex> lock(topics_mutex_);
     if (topics_.find(topic) != topics_.end()) {
         return false; // 已存在
     }
-    auto data = std::make_unique<TopicData>();
-    data->ring_buffer = std::make_unique<SpscRingBuffer>(default_buffer_size_);
+    auto data = std::make_unique<TopicData>(default_buffer_size_);
+    data->topic_name = topic;
     topics_[topic] = std::move(data);
     return true;
 }
@@ -26,6 +56,9 @@ bool MemoryMessageStore::DeleteTopic(const TopicName& topic) {
         return false;
     }
     topics_.erase(it);
+    // 同时清理 DLQ
+    std::lock_guard<std::mutex> dlq_lock(dlq_mutex_);
+    dlq_storage_.erase(MakeDlqName(topic));
     return true;
 }
 
@@ -34,6 +67,10 @@ bool MemoryMessageStore::HasTopic(const TopicName& topic) const {
     return topics_.find(topic) != topics_.end();
 }
 
+// ============================================================================
+// 消息发布
+// ============================================================================
+
 bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id) {
     TopicData* topic_data = nullptr;
     {
@@ -41,8 +78,8 @@ bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload,
         auto it = topics_.find(topic);
         if (it == topics_.end()) {
             // 自动创建 Topic
-            auto data = std::make_unique<TopicData>();
-            data->ring_buffer = std::make_unique<SpscRingBuffer>(default_buffer_size_);
+            auto data = std::make_unique<TopicData>(default_buffer_size_);
+            data->topic_name = topic;
             topic_data = data.get();
             topics_[topic] = std::move(data);
         } else {
@@ -50,10 +87,10 @@ bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload,
         }
     }
 
-    // 分配消息 ID
+    // 分配消息 ID（原子操作，无锁）
     out_msg_id = topic_data->next_msg_id.fetch_add(1, std::memory_order_relaxed);
 
-    // 序列化：msg_id(8B) + timestamp(8B) + payload_size(4B) + payload(NB)
+    // 序列化消息：msg_id(8B) + timestamp(8B) + payload_size(4B) + payload(NB)
     const uint64_t timestamp = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -80,33 +117,165 @@ bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload,
     // payload
     serialized.insert(serialized.end(), payload.begin(), payload.end());
 
+    // 写入无锁 Ring Buffer
     return topic_data->ring_buffer->Push(serialized);
 }
 
-std::vector<StoredMessage> MemoryMessageStore::Pull(
-    const TopicName& topic, const SubscriberId& subscriber_id, uint32_t max_messages) {
-    std::vector<StoredMessage> result;
+// ============================================================================
+// 消息拉取
+// ============================================================================
 
-    SpscRingBuffer* ring_buffer = nullptr;
+std::vector<StoredMessage> MemoryMessageStore::Pull(
+    const TopicName& topic,
+    const std::string& consumer_id,
+    uint32_t max_messages,
+    bool is_group) {
+    
+    std::vector<StoredMessage> result;
+    TopicData* topic_data = nullptr;
+    
     {
         std::lock_guard<std::mutex> lock(topics_mutex_);
         auto it = topics_.find(topic);
         if (it == topics_.end()) {
-            return result;
+            return result; // Topic 不存在
         }
-        ring_buffer = it->second->ring_buffer.get();
+        topic_data = it->second.get();
     }
 
-    // 获取当前 offset（这里简化处理，不严格按 offset 过滤）
-    for (uint32_t i = 0; i < max_messages; ++i) {
-        auto data = ring_buffer->Pop();
-        if (!data.has_value()) {
+    // 加锁保护消息日志和 offset
+    std::lock_guard<std::mutex> lock(topic_data->mutex);
+
+    // 先将 Ring Buffer 中的新消息 drain 到日志
+    DrainRingBuffer(*topic_data);
+
+    // 获取当前 offset
+    const std::string consumer_key = MakeConsumerKey(is_group, consumer_id);
+    MessageId& offset = is_group 
+        ? topic_data->group_offsets[consumer_key] 
+        : topic_data->subscriber_offsets[consumer_key];
+    
+    if (offset == 0) {
+        offset = 1; // 从第一条消息开始
+    }
+
+    // 从主日志中拉取消息（按 offset 顺序）
+    for (const auto& msg : topic_data->message_log) {
+        if (result.size() >= max_messages) {
+            break;
+        }
+        if (msg.id >= offset) {
+            // 检查是否已经在 pending 中（避免重复投递）
+            auto& pending_map = topic_data->pending_acks[consumer_key];
+            if (pending_map.find(msg.id) == pending_map.end()) {
+                result.push_back(msg);
+                pending_map[msg.id] = PendingMessage{
+                    msg,
+                    std::chrono::steady_clock::now()
+                };
+                // 推进 offset：该消息已分配，下一条从新位置开始
+                offset = msg.id + 1;
+            }
+        }
+    }
+    
+    // 从重试队列中拉取消息（不检查 offset，因为重试消息可能 ID 较小）
+    // 注意：重试消息是 per-consumer 的，消费后从 retry_queue 中移除
+    for (auto it = topic_data->retry_queue.begin(); it != topic_data->retry_queue.end(); ) {
+        if (result.size() >= max_messages) {
+            break;
+        }
+        auto& pending_map = topic_data->pending_acks[consumer_key];
+        if (pending_map.find(it->id) == pending_map.end()) {
+            result.push_back(*it);
+            pending_map[it->id] = PendingMessage{
+                *it,
+                std::chrono::steady_clock::now()
+            };
+            it = topic_data->retry_queue.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// 消息确认
+// ============================================================================
+
+bool MemoryMessageStore::Ack(
+    const TopicName& topic,
+    const std::string& consumer_id,
+    MessageId msg_id,
+    bool is_group) {
+    
+    TopicData* topic_data = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+        auto it = topics_.find(topic);
+        if (it == topics_.end()) {
+            return false;
+        }
+        topic_data = it->second.get();
+    }
+
+    std::lock_guard<std::mutex> lock(topic_data->mutex);
+    const std::string consumer_key = MakeConsumerKey(is_group, consumer_id);
+    
+    auto& pending_map = topic_data->pending_acks[consumer_key];
+    auto it = pending_map.find(msg_id);
+    if (it == pending_map.end()) {
+        return false; // 消息不在 pending 列表中
+    }
+
+    // 确认成功，从 pending 中移除
+    pending_map.erase(it);
+    return true;
+}
+
+// ============================================================================
+// 死信队列
+// ============================================================================
+
+std::vector<StoredMessage> MemoryMessageStore::PullDlq(
+    const TopicName& topic,
+    uint32_t max_messages) {
+    
+    std::vector<StoredMessage> result;
+    std::lock_guard<std::mutex> lock(dlq_mutex_);
+    
+    auto it = dlq_storage_.find(MakeDlqName(topic));
+    if (it == dlq_storage_.end()) {
+        return result;
+    }
+
+    auto& dlq = it->second;
+    const size_t count = std::min(static_cast<size_t>(max_messages), dlq.size());
+    for (size_t i = 0; i < count; ++i) {
+        result.push_back(dlq[i]);
+    }
+    
+    // 移除已拉取的消息
+    dlq.erase(dlq.begin(), dlq.begin() + count);
+    return result;
+}
+
+// ============================================================================
+// 内部工具函数
+// ============================================================================
+
+void MemoryMessageStore::DrainRingBuffer(TopicData& topic_data) {
+    while (true) {
+        auto data_opt = topic_data.ring_buffer->Pop();
+        if (!data_opt.has_value()) {
             break;
         }
 
-        const auto& buf = data.value();
+        const auto& buf = data_opt.value();
         if (buf.size() < sizeof(MessageId) + sizeof(uint64_t) + sizeof(uint32_t)) {
-            continue;
+            continue; // 数据损坏，跳过
         }
 
         size_t offset = 0;
@@ -130,31 +299,107 @@ std::vector<StoredMessage> MemoryMessageStore::Pull(
         }
 
         if (buf.size() < offset + payload_size) {
-            continue;
+            continue; // 数据不足
         }
 
         StoredMessage msg;
         msg.id = msg_id;
-        msg.topic_name = topic;
+        msg.topic_name = ""; // 在日志中不重复存储 topic 名称以节省内存
         msg.payload.assign(buf.begin() + offset, buf.begin() + offset + payload_size);
         msg.timestamp = timestamp;
-        result.push_back(std::move(msg));
-    }
+        msg.retry_count = 0;
 
-    // 更新 offset
-    if (!result.empty()) {
-        std::lock_guard<std::mutex> lock(offsets_mutex_);
-        subscriber_offsets_[MakeOffsetKey(topic, subscriber_id)].last_acked_id = result.back().id;
+        topic_data.message_log.push_back(std::move(msg));
     }
-
-    return result;
 }
 
-bool MemoryMessageStore::Ack(const TopicName& topic, const SubscriberId& subscriber_id, MessageId msg_id) {
-    std::lock_guard<std::mutex> lock(offsets_mutex_);
-    auto key = MakeOffsetKey(topic, subscriber_id);
-    subscriber_offsets_[key].last_acked_id = msg_id;
-    return true;
+void MemoryMessageStore::RetryLoop() {
+    while (true) {
+        std::unique_lock<std::mutex> lock(retry_mutex_);
+        retry_cv_.wait_for(lock, std::chrono::milliseconds(retry_interval_ms_), [this] {
+            return stop_retry_thread_.load();
+        });
+        
+        if (stop_retry_thread_.load()) {
+            break;
+        }
+
+        // 扫描所有 Topic 的 pending 消息
+        std::vector<TopicData*> topic_data_list;
+        {
+            std::lock_guard<std::mutex> topics_lock(topics_mutex_);
+            for (auto& [name, data] : topics_) {
+                topic_data_list.push_back(data.get());
+            }
+        }
+
+        for (auto* topic_data : topic_data_list) {
+            ProcessPendingRetries(*topic_data);
+        }
+    }
+}
+
+void MemoryMessageStore::ProcessPendingRetries(TopicData& topic_data) {
+    std::lock_guard<std::mutex> lock(topic_data.mutex);
+    
+    const auto now = std::chrono::steady_clock::now();
+    
+    // 遍历所有消费者的 pending 消息
+    std::vector<std::string> empty_consumer_keys;
+    for (auto& [consumer_key, pending_map] : topic_data.pending_acks) {
+        std::vector<MessageId> to_remove;
+        
+        for (auto& [msg_id, pending] : pending_map) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - pending.pull_time).count();
+            
+            if (elapsed_ms >= static_cast<int64_t>(pending_timeout_ms_)) {
+                // 超时未 ACK
+                to_remove.push_back(msg_id);
+                
+                if (pending.msg.retry_count >= max_retry_count_) {
+                    // 超过最大重试次数，转入 DLQ
+                    StoredMessage dlq_msg = pending.msg;
+                    dlq_msg.retry_count = pending.msg.retry_count;
+                    {
+                        std::lock_guard<std::mutex> dlq_lock(dlq_mutex_);
+                        dlq_storage_[MakeDlqName(topic_data.topic_name)].push_back(std::move(dlq_msg));
+                    }
+                } else {
+                    // 放入重试队列（增加重试计数）
+                    // 先移除同一 msg_id 的旧重试记录，避免队列中积累多个版本
+                    topic_data.retry_queue.erase(
+                        std::remove_if(topic_data.retry_queue.begin(), topic_data.retry_queue.end(),
+                            [msg_id](const StoredMessage& m) { return m.id == msg_id; }),
+                        topic_data.retry_queue.end());
+                    StoredMessage retry_msg = pending.msg;
+                    retry_msg.retry_count = pending.msg.retry_count + 1;
+                    topic_data.retry_queue.push_back(std::move(retry_msg));
+                }
+            }
+        }
+        
+        // 从 pending 中移除已处理的消息
+        for (MessageId msg_id : to_remove) {
+            pending_map.erase(msg_id);
+        }
+        
+        if (pending_map.empty()) {
+            empty_consumer_keys.push_back(consumer_key);
+        }
+    }
+    
+    for (const auto& key : empty_consumer_keys) {
+        topic_data.pending_acks.erase(key);
+    }
+}
+
+TopicName MemoryMessageStore::MakeDlqName(const TopicName& topic) {
+    return "__dlq." + topic;
+}
+
+std::string MemoryMessageStore::MakeConsumerKey(bool is_group, const std::string& id) {
+    return is_group ? ("grp:" + id) : ("sub:" + id);
 }
 
 } // namespace pmqueue

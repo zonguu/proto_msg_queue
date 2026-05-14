@@ -11,7 +11,7 @@ namespace pmqueue {
 struct SubscriberInfo {
     SubscriberId id;
     ConnectionId conn_id;
-    MessageCallback callback;
+    MessageCallback callback = nullptr;
 };
 
 struct TopicInfo {

@@ -17,6 +17,9 @@ namespace pmqueue {
  * @brief 消息队列 Broker
  * 
  * 协调网络层和存储层，处理发布订阅逻辑。
+ * 支持两种消费模式：
+ * 1. 广播模式：每个订阅者独立消费全部消息
+ * 2. 消费者组模式：组内成员轮询分摊消息，每条消息只被组内一个消费者处理
  */
 class Broker : public NonCopyable {
 public:
@@ -38,8 +41,10 @@ private:
     void HandleUnsubscribe(const Connection::Ptr& conn, const Frame& frame);
     void HandlePull(const Connection::Ptr& conn, const Frame& frame);
     void HandleAck(const Connection::Ptr& conn, const Frame& frame);
+    void HandlePullDlq(const Connection::Ptr& conn, const Frame& frame);
 
     void SendResponse(const Connection::Ptr& conn, bool success, const std::string& error_msg = "", MessageId msg_id = 0);
+    void SendPushMessage(const Connection::Ptr& conn, const StoredMessage& msg, const std::string& topic);
 
     std::unique_ptr<IMessageStore> store_;
     TopicManager topic_manager_;

@@ -51,6 +51,7 @@ void Broker::OnFrameReceived(const Connection::Ptr& conn, const Frame& frame) {
         case FrameMessageType::Ack:
             HandleAck(conn, frame);
             break;
+        case FrameMessageType::Unknown:
         default:
             SendResponse(conn, false, "Unknown message type");
             break;
@@ -69,7 +70,7 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
     bool success = store_->Publish(req.topic(), payload, msg_id);
 
     if (success) {
-        // 推送给订阅者
+        // 推送给广播订阅者（所有订阅者都收到）
         auto subscribers = topic_manager_.GetSubscribers(req.topic());
         if (!subscribers.empty()) {
             pmqueue::PushMessage push_msg;
@@ -79,6 +80,7 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
             push_msg.set_timestamp(static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
+            push_msg.set_retry_count(0);
 
             std::string push_data;
             push_msg.SerializeToString(&push_data);
@@ -89,6 +91,48 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
 
             for (const auto& sub : subscribers) {
                 server_.SendTo(sub.conn_id, push_frame);
+            }
+        }
+
+        // 消费者组：消息在组内轮询分配，这里只通知有消息到达
+        // （消费者组通常采用 pull 模式，但也可以支持 push）
+        auto groups = topic_manager_.GetConsumerGroups(req.topic());
+        for (const auto& group : groups) {
+            if (group.members.empty()) {
+                continue;
+            }
+            // Round-Robin 选择一个成员推送
+            std::string selected_member = topic_manager_.SelectNextMember(req.topic(), group.group_id);
+            if (selected_member.empty()) {
+                continue;
+            }
+            
+            // 找到对应成员的 conn_id
+            ConnectionId target_conn_id = 0;
+            for (const auto& member : group.members) {
+                if (member.subscriber_id == selected_member) {
+                    target_conn_id = member.conn_id;
+                    break;
+                }
+            }
+            
+            if (target_conn_id != 0) {
+                pmqueue::PushMessage push_msg;
+                push_msg.set_message_id(msg_id);
+                push_msg.set_topic(req.topic());
+                push_msg.set_payload(req.payload());
+                push_msg.set_timestamp(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count()));
+                push_msg.set_retry_count(0);
+
+                std::string push_data;
+                push_msg.SerializeToString(&push_data);
+
+                Frame push_frame;
+                push_frame.msg_type = FrameMessageType::Push;
+                push_frame.payload.assign(push_data.begin(), push_data.end());
+                server_.SendTo(target_conn_id, push_frame);
             }
         }
     }
@@ -107,7 +151,7 @@ void Broker::HandleSubscribe(const Connection::Ptr& conn, const Frame& frame) {
     info.id = req.subscriber_id();
     info.conn_id = conn->GetId();
 
-    bool success = topic_manager_.Subscribe(req.topic(), info);
+    bool success = topic_manager_.Subscribe(req.topic(), info, req.group_id());
     if (success) {
         store_->CreateTopic(req.topic());
     }
@@ -122,7 +166,7 @@ void Broker::HandleUnsubscribe(const Connection::Ptr& conn, const Frame& frame) 
         return;
     }
 
-    bool success = topic_manager_.Unsubscribe(req.topic(), req.subscriber_id());
+    bool success = topic_manager_.Unsubscribe(req.topic(), req.subscriber_id(), req.group_id());
     SendResponse(conn, success, success ? "" : "Not subscribed");
 }
 
@@ -133,22 +177,13 @@ void Broker::HandlePull(const Connection::Ptr& conn, const Frame& frame) {
         return;
     }
 
-    auto messages = store_->Pull(req.topic(), req.subscriber_id(), req.max_messages());
+    const bool is_group = !req.group_id().empty();
+    const std::string& consumer_id = is_group ? req.group_id() : req.subscriber_id();
+
+    auto messages = store_->Pull(req.topic(), consumer_id, req.max_messages(), is_group);
 
     for (const auto& msg : messages) {
-        pmqueue::PushMessage push_msg;
-        push_msg.set_message_id(msg.id);
-        push_msg.set_topic(msg.topic_name);
-        push_msg.set_payload(std::string(msg.payload.begin(), msg.payload.end()));
-        push_msg.set_timestamp(msg.timestamp);
-
-        std::string push_data;
-        push_msg.SerializeToString(&push_data);
-
-        Frame push_frame;
-        push_frame.msg_type = FrameMessageType::Push;
-        push_frame.payload.assign(push_data.begin(), push_data.end());
-        conn->SendFrame(push_frame);
+        SendPushMessage(conn, msg, req.topic());
     }
 
     SendResponse(conn, true, "", messages.empty() ? 0 : messages.back().id);
@@ -161,7 +196,10 @@ void Broker::HandleAck(const Connection::Ptr& conn, const Frame& frame) {
         return;
     }
 
-    bool success = store_->Ack(req.topic(), req.subscriber_id(), req.message_id());
+    const bool is_group = !req.group_id().empty();
+    const std::string& consumer_id = is_group ? req.group_id() : req.subscriber_id();
+
+    bool success = store_->Ack(req.topic(), consumer_id, req.message_id(), is_group);
     SendResponse(conn, success);
 }
 
@@ -178,6 +216,23 @@ void Broker::SendResponse(const Connection::Ptr& conn, bool success, const std::
     frame.msg_type = FrameMessageType::Response;
     frame.payload.assign(resp_data.begin(), resp_data.end());
     conn->SendFrame(frame);
+}
+
+void Broker::SendPushMessage(const Connection::Ptr& conn, const StoredMessage& msg, const std::string& topic) {
+    pmqueue::PushMessage push_msg;
+    push_msg.set_message_id(msg.id);
+    push_msg.set_topic(topic);
+    push_msg.set_payload(std::string(msg.payload.begin(), msg.payload.end()));
+    push_msg.set_timestamp(msg.timestamp);
+    push_msg.set_retry_count(msg.retry_count);
+
+    std::string push_data;
+    push_msg.SerializeToString(&push_data);
+
+    Frame push_frame;
+    push_frame.msg_type = FrameMessageType::Push;
+    push_frame.payload.assign(push_data.begin(), push_data.end());
+    conn->SendFrame(push_frame);
 }
 
 } // namespace pmqueue

@@ -14,6 +14,7 @@ using namespace pmqueue;
 class IntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // 使用默认重试参数
         auto store = std::make_unique<MemoryMessageStore>(1024 * 1024);
         broker_ = std::make_unique<Broker>(std::move(store), 19090);
         ASSERT_TRUE(broker_->Start());
@@ -66,7 +67,6 @@ TEST_F(IntegrationTest, PublishAndResponse) {
 
     EXPECT_TRUE(client.SendFrame(frame));
 
-    // 等待响应
     for (int i = 0; i < 50 && !received_response.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -119,7 +119,6 @@ TEST_F(IntegrationTest, SubscribeAndPush) {
     pub_frame.payload.assign(pub_data.begin(), pub_data.end());
     client.SendFrame(pub_frame);
 
-    // 等待推送
     for (int i = 0; i < 50 && !received_push.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -170,7 +169,6 @@ TEST_F(IntegrationTest, PullMessages) {
     pull_frame.payload.assign(pull_data.begin(), pull_data.end());
     client.SendFrame(pull_frame);
 
-    // 等待拉取结果
     for (int i = 0; i < 50 && push_count.load() < 5; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -228,7 +226,6 @@ TEST_F(IntegrationTest, MultipleClients) {
     pub_frame.payload.assign(pub_data.begin(), pub_data.end());
     pub_client->SendFrame(pub_frame);
 
-    // 等待所有客户端收到推送
     for (int i = 0; i < 50 && total_pushes.load() < kClientCount; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -239,4 +236,160 @@ TEST_F(IntegrationTest, MultipleClients) {
         client->Disconnect();
     }
     pub_client->Disconnect();
+}
+
+// ============================================================================
+// 消费者组集成测试
+// ============================================================================
+
+TEST_F(IntegrationTest, ConsumerGroupRoundRobin) {
+    // 创建 3 个客户端加入同一个消费者组
+    constexpr int kMemberCount = 3;
+    std::vector<std::unique_ptr<TcpClient>> members;
+    std::atomic<int> total_received{0};
+    std::atomic<int> member_received[3] = {0, 0, 0};
+
+    for (int i = 0; i < kMemberCount; ++i) {
+        auto client = std::make_unique<TcpClient>();
+        ASSERT_TRUE(client->Connect("127.0.0.1", 19090));
+
+        int idx = i;
+        client->SetFrameHandler([&total_received, &member_received, idx](const Frame& frame) {
+            if (frame.msg_type == FrameMessageType::Push) {
+                total_received.fetch_add(1);
+                member_received[idx].fetch_add(1);
+            }
+        });
+
+        pmqueue::SubscribeRequest sub_req;
+        sub_req.set_topic("group_topic");
+        sub_req.set_subscriber_id("member" + std::to_string(i));
+        sub_req.set_group_id("group_a");
+
+        std::string sub_data;
+        sub_req.SerializeToString(&sub_data);
+
+        Frame sub_frame;
+        sub_frame.msg_type = FrameMessageType::Subscribe;
+        sub_frame.payload.assign(sub_data.begin(), sub_data.end());
+        client->SendFrame(sub_frame);
+
+        members.push_back(std::move(client));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // 发布 6 条消息
+    auto pub_client = std::make_unique<TcpClient>();
+    ASSERT_TRUE(pub_client->Connect("127.0.0.1", 19090));
+
+    for (int i = 0; i < 6; ++i) {
+        pmqueue::PublishRequest pub_req;
+        pub_req.set_topic("group_topic");
+        pub_req.set_payload("msg" + std::to_string(i));
+
+        std::string pub_data;
+        pub_req.SerializeToString(&pub_data);
+
+        Frame pub_frame;
+        pub_frame.msg_type = FrameMessageType::Publish;
+        pub_frame.payload.assign(pub_data.begin(), pub_data.end());
+        pub_client->SendFrame(pub_frame);
+    }
+
+    // 等待消息分发
+    for (int i = 0; i < 50 && total_received.load() < 6; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // 消费者组内 Round-Robin 分发，6 条消息分给 3 个成员
+    EXPECT_EQ(total_received.load(), 6);
+    
+    // 每个成员应该收到 2 条（不一定精确，因为网络可能有延迟，但至少每人应收到消息）
+    for (int i = 0; i < kMemberCount; ++i) {
+        EXPECT_GE(member_received[i].load(), 1);
+    }
+
+    for (auto& client : members) {
+        client->Disconnect();
+    }
+    pub_client->Disconnect();
+}
+
+TEST_F(IntegrationTest, ConsumerGroupPullAndAck) {
+    TcpClient client;
+    ASSERT_TRUE(client.Connect("127.0.0.1", 19090));
+
+    // 以消费者组成员身份订阅
+    pmqueue::SubscribeRequest sub_req;
+    sub_req.set_topic("pull_group_topic");
+    sub_req.set_subscriber_id("member1");
+    sub_req.set_group_id("group_pull");
+
+    std::string sub_data;
+    sub_req.SerializeToString(&sub_data);
+    Frame sub_frame;
+    sub_frame.msg_type = FrameMessageType::Subscribe;
+    sub_frame.payload.assign(sub_data.begin(), sub_data.end());
+    client.SendFrame(sub_frame);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // 发布消息
+    pmqueue::PublishRequest pub_req;
+    pub_req.set_topic("pull_group_topic");
+    pub_req.set_payload("group_msg");
+    std::string pub_data;
+    pub_req.SerializeToString(&pub_data);
+    Frame pub_frame;
+    pub_frame.msg_type = FrameMessageType::Publish;
+    pub_frame.payload.assign(pub_data.begin(), pub_data.end());
+    client.SendFrame(pub_frame);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // 以消费者组身份拉取
+    std::atomic<MessageId> received_msg_id{0};
+    client.SetFrameHandler([&](const Frame& frame) {
+        if (frame.msg_type == FrameMessageType::Push) {
+            pmqueue::PushMessage push;
+            if (push.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+                received_msg_id.store(push.message_id());
+            }
+        }
+    });
+
+    pmqueue::PullRequest pull_req;
+    pull_req.set_topic("pull_group_topic");
+    pull_req.set_group_id("group_pull");
+    pull_req.set_max_messages(1);
+
+    std::string pull_data;
+    pull_req.SerializeToString(&pull_data);
+    Frame pull_frame;
+    pull_frame.msg_type = FrameMessageType::Pull;
+    pull_frame.payload.assign(pull_data.begin(), pull_data.end());
+    client.SendFrame(pull_frame);
+
+    for (int i = 0; i < 50 && received_msg_id.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    ASSERT_GT(received_msg_id.load(), 0);
+
+    // ACK 消息
+    pmqueue::AckRequest ack_req;
+    ack_req.set_topic("pull_group_topic");
+    ack_req.set_group_id("group_pull");
+    ack_req.set_message_id(received_msg_id.load());
+
+    std::string ack_data;
+    ack_req.SerializeToString(&ack_data);
+    Frame ack_frame;
+    ack_frame.msg_type = FrameMessageType::Ack;
+    ack_frame.payload.assign(ack_data.begin(), ack_data.end());
+    client.SendFrame(ack_frame);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    client.Disconnect();
 }

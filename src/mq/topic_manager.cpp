@@ -19,6 +19,7 @@ bool TopicManager::UnregisterTopic(const std::string& topic_name) {
     std::lock_guard<std::mutex> lock(mutex_);
     topics_.erase(topic_name);
     subscribers_.erase(topic_name);
+    consumer_groups_.erase(topic_name);
     return true;
 }
 
@@ -41,10 +42,15 @@ std::vector<TopicInfo> TopicManager::GetAllTopics() const {
     return result;
 }
 
-bool TopicManager::Subscribe(const std::string& topic_name, const SubscriberInfo& subscriber) {
+bool TopicManager::Subscribe(
+    const std::string& topic_name, 
+    const SubscriberInfo& subscriber, 
+    const std::string& group_id) {
+    
     std::lock_guard<std::mutex> lock(mutex_);
+    
+    // 自动创建 Topic
     if (topics_.find(topic_name) == topics_.end()) {
-        // 自动创建 Topic
         TopicInfo topic;
         topic.name = topic_name;
         topic.create_time = 0;
@@ -52,33 +58,85 @@ bool TopicManager::Subscribe(const std::string& topic_name, const SubscriberInfo
         topics_[topic_name] = topic;
     }
 
-    auto& subs = subscribers_[topic_name];
-    // 检查是否已存在
-    auto it = std::find_if(subs.begin(), subs.end(),
-        [&subscriber](const SubscriberInfo& info) { return info.id == subscriber.id; });
-    if (it != subs.end()) {
-        return false;
+    if (group_id.empty()) {
+        // 广播订阅
+        auto& subs = subscribers_[topic_name];
+        auto it = std::find_if(subs.begin(), subs.end(),
+            [&subscriber](const SubscriberInfo& info) { return info.id == subscriber.id; });
+        if (it != subs.end()) {
+            return false; // 已存在
+        }
+        subs.push_back(subscriber);
+    } else {
+        // 消费者组订阅
+        auto& groups = consumer_groups_[topic_name];
+        auto group_it = groups.find(group_id);
+        if (group_it == groups.end()) {
+            // 创建新消费者组
+            ConsumerGroup group;
+            group.group_id = group_id;
+            group.topic_name = topic_name;
+            group.members.push_back({subscriber.id, subscriber.conn_id});
+            groups[group_id] = std::move(group);
+        } else {
+            // 加入已有组
+            auto& members = group_it->second.members;
+            auto member_it = std::find_if(members.begin(), members.end(),
+                [&subscriber](const ConsumerGroupMember& m) { return m.subscriber_id == subscriber.id; });
+            if (member_it != members.end()) {
+                return false; // 已存在
+            }
+            members.push_back({subscriber.id, subscriber.conn_id});
+        }
     }
-
-    subs.push_back(subscriber);
+    
     return true;
 }
 
-bool TopicManager::Unsubscribe(const std::string& topic_name, const SubscriberId& subscriber_id) {
+bool TopicManager::Unsubscribe(
+    const std::string& topic_name, 
+    const SubscriberId& subscriber_id, 
+    const std::string& group_id) {
+    
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = subscribers_.find(topic_name);
-    if (it == subscribers_.end()) {
-        return false;
+    
+    if (group_id.empty()) {
+        // 广播订阅取消
+        auto it = subscribers_.find(topic_name);
+        if (it == subscribers_.end()) {
+            return false;
+        }
+        auto& subs = it->second;
+        auto sub_it = std::remove_if(subs.begin(), subs.end(),
+            [&subscriber_id](const SubscriberInfo& info) { return info.id == subscriber_id; });
+        if (sub_it == subs.end()) {
+            return false;
+        }
+        subs.erase(sub_it, subs.end());
+    } else {
+        // 消费者组取消
+        auto topic_it = consumer_groups_.find(topic_name);
+        if (topic_it == consumer_groups_.end()) {
+            return false;
+        }
+        auto group_it = topic_it->second.find(group_id);
+        if (group_it == topic_it->second.end()) {
+            return false;
+        }
+        auto& members = group_it->second.members;
+        auto member_it = std::remove_if(members.begin(), members.end(),
+            [&subscriber_id](const ConsumerGroupMember& m) { return m.subscriber_id == subscriber_id; });
+        if (member_it == members.end()) {
+            return false;
+        }
+        members.erase(member_it, members.end());
+        
+        // 如果组内无成员，删除该组
+        if (members.empty()) {
+            topic_it->second.erase(group_it);
+        }
     }
-
-    auto& subs = it->second;
-    auto sub_it = std::remove_if(subs.begin(), subs.end(),
-        [&subscriber_id](const SubscriberInfo& info) { return info.id == subscriber_id; });
-    if (sub_it == subs.end()) {
-        return false;
-    }
-
-    subs.erase(sub_it, subs.end());
+    
     return true;
 }
 
@@ -89,6 +147,53 @@ std::vector<SubscriberInfo> TopicManager::GetSubscribers(const std::string& topi
         return it->second;
     }
     return {};
+}
+
+std::vector<ConsumerGroup> TopicManager::GetConsumerGroups(const std::string& topic_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = consumer_groups_.find(topic_name);
+    if (it != consumer_groups_.end()) {
+        std::vector<ConsumerGroup> result;
+        for (const auto& [group_id, group] : it->second) {
+            result.push_back(group);
+        }
+        return result;
+    }
+    return {};
+}
+
+std::optional<ConsumerGroup> TopicManager::GetConsumerGroup(
+    const std::string& topic_name, 
+    const std::string& group_id) const {
+    
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto topic_it = consumer_groups_.find(topic_name);
+    if (topic_it == consumer_groups_.end()) {
+        return std::nullopt;
+    }
+    auto group_it = topic_it->second.find(group_id);
+    if (group_it == topic_it->second.end()) {
+        return std::nullopt;
+    }
+    return group_it->second;
+}
+
+std::string TopicManager::SelectNextMember(const std::string& topic_name, const std::string& group_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto topic_it = consumer_groups_.find(topic_name);
+    if (topic_it == consumer_groups_.end()) {
+        return "";
+    }
+    auto group_it = topic_it->second.find(group_id);
+    if (group_it == topic_it->second.end() || group_it->second.members.empty()) {
+        return "";
+    }
+    
+    auto& group = group_it->second;
+    const size_t idx = group.round_robin_index % group.members.size();
+    group.round_robin_index = (group.round_robin_index + 1) % group.members.size();
+    return group.members[idx].subscriber_id;
 }
 
 bool TopicManager::HasTopic(const std::string& topic_name) const {

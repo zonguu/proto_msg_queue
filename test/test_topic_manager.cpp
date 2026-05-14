@@ -112,3 +112,79 @@ TEST(TopicManagerTest, MultipleSubscribers) {
     auto subs = tm.GetSubscribers("topic1");
     EXPECT_EQ(subs.size(), 10);
 }
+
+// ============================================================================
+// 消费者组测试
+// ============================================================================
+
+TEST(TopicManagerTest, ConsumerGroupSubscribe) {
+    TopicManager tm;
+
+    SubscriberInfo sub1;
+    sub1.id = "member1";
+    sub1.conn_id = 1;
+
+    SubscriberInfo sub2;
+    sub2.id = "member2";
+    sub2.conn_id = 2;
+
+    // 加入同一消费者组
+    EXPECT_TRUE(tm.Subscribe("topic1", sub1, "group_a"));
+    EXPECT_TRUE(tm.Subscribe("topic1", sub2, "group_a"));
+    EXPECT_FALSE(tm.Subscribe("topic1", sub1, "group_a")); // 重复加入
+
+    auto groups = tm.GetConsumerGroups("topic1");
+    ASSERT_EQ(groups.size(), 1);
+    EXPECT_EQ(groups[0].group_id, "group_a");
+    EXPECT_EQ(groups[0].members.size(), 2);
+}
+
+TEST(TopicManagerTest, ConsumerGroupUnsubscribe) {
+    TopicManager tm;
+
+    tm.Subscribe("topic1", SubscriberInfo{"m1", 1}, "group_a");
+    tm.Subscribe("topic1", SubscriberInfo{"m2", 2}, "group_a");
+
+    EXPECT_TRUE(tm.Unsubscribe("topic1", "m1", "group_a"));
+    auto groups = tm.GetConsumerGroups("topic1");
+    ASSERT_EQ(groups.size(), 1);
+    EXPECT_EQ(groups[0].members.size(), 1);
+
+    // 退完所有成员后组应被删除
+    EXPECT_TRUE(tm.Unsubscribe("topic1", "m2", "group_a"));
+    auto groups2 = tm.GetConsumerGroups("topic1");
+    EXPECT_TRUE(groups2.empty());
+}
+
+TEST(TopicManagerTest, ConsumerGroupRoundRobin) {
+    TopicManager tm;
+
+    tm.Subscribe("topic1", SubscriberInfo{"m1", 1}, "group_a");
+    tm.Subscribe("topic1", SubscriberInfo{"m2", 2}, "group_a");
+    tm.Subscribe("topic1", SubscriberInfo{"m3", 3}, "group_a");
+
+    // Round-Robin 选择
+    EXPECT_EQ(tm.SelectNextMember("topic1", "group_a"), "m1");
+    EXPECT_EQ(tm.SelectNextMember("topic1", "group_a"), "m2");
+    EXPECT_EQ(tm.SelectNextMember("topic1", "group_a"), "m3");
+    EXPECT_EQ(tm.SelectNextMember("topic1", "group_a"), "m1"); // 循环
+}
+
+TEST(TopicManagerTest, BroadcastAndGroupCoexist) {
+    TopicManager tm;
+
+    // 广播订阅者
+    tm.Subscribe("topic1", SubscriberInfo{"broadcast_sub", 100});
+
+    // 消费者组成员
+    tm.Subscribe("topic1", SubscriberInfo{"g1_m1", 1}, "group1");
+    tm.Subscribe("topic1", SubscriberInfo{"g1_m2", 2}, "group1");
+
+    auto subs = tm.GetSubscribers("topic1");
+    EXPECT_EQ(subs.size(), 1);
+    EXPECT_EQ(subs[0].id, "broadcast_sub");
+
+    auto groups = tm.GetConsumerGroups("topic1");
+    EXPECT_EQ(groups.size(), 1);
+    EXPECT_EQ(groups[0].members.size(), 2);
+}

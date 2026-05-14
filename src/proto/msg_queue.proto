@@ -12,6 +12,7 @@ enum MessageType {
     ACK = 5;           // 确认消费
     RESPONSE = 6;      // 通用响应
     PUSH = 7;          // 服务端推送
+    PULL_DLQ = 8;      // 拉取死信队列
 }
 
 // 发布消息
@@ -24,26 +25,30 @@ message PublishRequest {
 message SubscribeRequest {
     string topic = 1;
     string subscriber_id = 2;
+    string group_id = 3;       // 消费者组 ID，为空表示独立消费者（广播模式）
 }
 
 // 取消订阅请求
 message UnsubscribeRequest {
     string topic = 1;
     string subscriber_id = 2;
+    string group_id = 3;
 }
 
 // 拉取消息请求
 message PullRequest {
     string topic = 1;
     string subscriber_id = 2;
-    uint32 max_messages = 3;
+    string group_id = 3;       // 消费者组 ID，为空表示独立消费者
+    uint32 max_messages = 4;
 }
 
 // 确认消费
 message AckRequest {
     string topic = 1;
     string subscriber_id = 2;
-    uint64 message_id = 3;
+    string group_id = 3;       // 消费者组 ID
+    uint64 message_id = 4;
 }
 
 // 通用响应
@@ -59,6 +64,7 @@ message PushMessage {
     string topic = 2;
     bytes payload = 3;
     uint64 timestamp = 4;
+    uint32 retry_count = 5;    // 当前重试次数，0 表示首次投递
 }
 
 // 通用消息包装
