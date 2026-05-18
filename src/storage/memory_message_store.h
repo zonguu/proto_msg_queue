@@ -17,7 +17,7 @@
 namespace pmqueue {
 
 /**
- * @brief 基于无锁环形缓冲区的内存消息存储实现（支持 ACK、重试、DLQ、消费者组）
+ * @brief 基于无锁环形缓冲区的内存消息存储实现（支持 ACK、重试、DLQ、消费者组、TTL）
  * 
  * 架构：
  * - 写入路径：生产者 -> SPSC Ring Buffer（无锁）-> 后台线程 drain 到消息日志
@@ -25,6 +25,7 @@ namespace pmqueue {
  * - 重试：未 ACK 消息进入 pending 队列，超时后自动重试（重新变为可读）
  * - DLQ：超过最大重试次数的消息转入死信队列
  * - 消费者组：组内所有消费者共享同一个 offset，消息只被组内一个消费者消费
+ * - TTL：消息可设置过期时间，过期后自动清理且消费端跳过
  */
 class MemoryMessageStore : public IMessageStore {
 public:
@@ -33,16 +34,18 @@ public:
      * @param max_retry_count 单条消息最大重试次数（默认 3）
      * @param pending_timeout_ms pending 消息超时时间（默认 5000ms）
      * @param retry_interval_ms 重试扫描间隔（默认 1000ms）
+     * @param expiration_check_interval_ms 过期检查间隔（默认 10000ms）
      */
     explicit MemoryMessageStore(
         size_t default_buffer_size = kDefaultRingBufferSize,
         uint32_t max_retry_count = 3,
         uint32_t pending_timeout_ms = 5000,
-        uint32_t retry_interval_ms = 1000);
+        uint32_t retry_interval_ms = 1000,
+        uint32_t expiration_check_interval_ms = kDefaultExpirationCheckIntervalMs);
     
     ~MemoryMessageStore() override;
 
-    bool Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id) override;
+    bool Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id, uint32_t ttl_ms = 0) override;
     
     std::vector<StoredMessage> Pull(
         const TopicName& topic, 
@@ -118,11 +121,15 @@ private:
     const uint32_t max_retry_count_;
     const uint32_t pending_timeout_ms_;
     const uint32_t retry_interval_ms_;
+    const uint32_t expiration_check_interval_ms_;
 
-    std::atomic<bool> stop_retry_thread_{false};
+    std::atomic<bool> stop_background_threads_{false};
     std::thread retry_thread_;
+    std::thread expiration_thread_;
     std::condition_variable retry_cv_;
     std::mutex retry_mutex_;
+    std::condition_variable expiration_cv_;
+    std::mutex expiration_mutex_;
 
     // 将 Ring Buffer 中的消息 drain 到消息日志
     void DrainRingBuffer(TopicData& topic_data);
@@ -130,14 +137,26 @@ private:
     // 后台重试线程入口
     void RetryLoop();
     
+    // 后台过期清理线程入口
+    void ExpirationLoop();
+    
     // 检查并处理一个 Topic 的 pending 超时消息
     void ProcessPendingRetries(TopicData& topic_data);
+    
+    // 清理一个 Topic 的过期消息
+    void ExpireTopicMessages(TopicData& topic_data);
     
     // 构造 DLQ Topic 名称
     static TopicName MakeDlqName(const TopicName& topic);
     
     // 构造 consumer key
     static std::string MakeConsumerKey(bool is_group, const std::string& id);
+    
+    // 获取当前毫秒时间戳
+    static uint64_t GetCurrentTimeMs();
+    
+    // 判断消息是否已过期
+    static bool IsMessageExpired(const StoredMessage& msg);
 };
 
 } // namespace pmqueue

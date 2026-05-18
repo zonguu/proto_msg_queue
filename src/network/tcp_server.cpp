@@ -68,6 +68,7 @@ bool TcpServer::Start() {
     running_ = true;
     accept_thread_ = std::thread(&TcpServer::AcceptLoop, this);
     event_thread_ = std::thread(&TcpServer::EventLoop, this);
+    heartbeat_thread_ = std::thread(&TcpServer::HeartbeatLoop, this);
 
     return true;
 }
@@ -103,6 +104,9 @@ void TcpServer::Stop() {
     }
     if (event_thread_.joinable()) {
         event_thread_.join();
+    }
+    if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
     }
 }
 
@@ -198,6 +202,47 @@ void TcpServer::EventLoop() {
             if (conn) {
                 conn->OnRead();
             }
+        }
+    }
+}
+
+void TcpServer::HeartbeatLoop() {
+    while (running_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kHeartbeatCheckIntervalMs));
+
+        if (!running_.load()) {
+            break;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        std::vector<Connection::Ptr> idle_conns;
+        std::vector<ConnectionId> idle_conn_ids;
+
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            for (auto& [id, conn] : connections_) {
+                if (conn->IsClosed()) {
+                    continue;
+                }
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - conn->GetLastActiveTime()).count();
+                if (elapsed_ms >= static_cast<int64_t>(kDefaultHeartbeatTimeoutMs)) {
+                    idle_conns.push_back(conn);
+                    idle_conn_ids.push_back(id);
+                }
+            }
+        }
+
+        // 通知上层清理订阅状态
+        for (auto conn_id : idle_conn_ids) {
+            if (idle_timeout_handler_) {
+                idle_timeout_handler_(conn_id);
+            }
+        }
+
+        // 关闭超时连接
+        for (auto& conn : idle_conns) {
+            conn->Close();
         }
     }
 }

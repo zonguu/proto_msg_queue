@@ -201,4 +201,55 @@ bool TopicManager::HasTopic(const std::string& topic_name) const {
     return topics_.find(topic_name) != topics_.end();
 }
 
+bool TopicManager::UnsubscribeByConnId(ConnectionId conn_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool removed_any = false;
+
+    // 清理广播订阅者
+    for (auto it = subscribers_.begin(); it != subscribers_.end(); ) {
+        auto& subs = it->second;
+        auto before_size = subs.size();
+        subs.erase(
+            std::remove_if(subs.begin(), subs.end(),
+                [conn_id](const SubscriberInfo& info) { return info.conn_id == conn_id; }),
+            subs.end());
+        if (subs.size() < before_size) {
+            removed_any = true;
+        }
+        if (subs.empty()) {
+            it = subscribers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // 清理消费者组成员
+    for (auto topic_it = consumer_groups_.begin(); topic_it != consumer_groups_.end(); ) {
+        auto& groups = topic_it->second;
+        for (auto group_it = groups.begin(); group_it != groups.end(); ) {
+            auto& members = group_it->second.members;
+            auto before_size = members.size();
+            members.erase(
+                std::remove_if(members.begin(), members.end(),
+                    [conn_id](const ConsumerGroupMember& m) { return m.conn_id == conn_id; }),
+                members.end());
+            if (members.size() < before_size) {
+                removed_any = true;
+            }
+            if (members.empty()) {
+                group_it = groups.erase(group_it);
+            } else {
+                ++group_it;
+            }
+        }
+        if (groups.empty()) {
+            topic_it = consumer_groups_.erase(topic_it);
+        } else {
+            ++topic_it;
+        }
+    }
+
+    return removed_any;
+}
+
 } // namespace pmqueue

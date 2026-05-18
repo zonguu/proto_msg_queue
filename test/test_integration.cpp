@@ -153,6 +153,11 @@ TEST_F(IntegrationTest, PullMessages) {
     client.SetFrameHandler([&](const Frame& frame) {
         if (frame.msg_type == FrameMessageType::Push) {
             push_count.fetch_add(1);
+        } else if (frame.msg_type == FrameMessageType::BatchPush) {
+            pmqueue::BatchPushMessage batch;
+            if (batch.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+                push_count.fetch_add(batch.messages_size());
+            }
         }
     });
 
@@ -189,6 +194,11 @@ TEST_F(IntegrationTest, MultipleClients) {
         client->SetFrameHandler([&total_pushes](const Frame& frame) {
             if (frame.msg_type == FrameMessageType::Push) {
                 total_pushes.fetch_add(1);
+            } else if (frame.msg_type == FrameMessageType::BatchPush) {
+                pmqueue::BatchPushMessage batch;
+                if (batch.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+                    total_pushes.fetch_add(batch.messages_size());
+                }
             }
         });
 

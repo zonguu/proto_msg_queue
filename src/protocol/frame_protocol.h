@@ -21,6 +21,10 @@ enum class FrameMessageType : uint8_t {
     Ack = 5,
     Response = 6,
     Push = 7,
+    BatchPublish = 9,
+    BatchPush = 10,
+    Ping = 11,
+    Pong = 12,
 };
 
 // 帧结构

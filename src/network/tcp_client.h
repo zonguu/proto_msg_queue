@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,13 +32,19 @@ public:
 
 private:
     void ReadLoop();
+    void PingLoop();
+    void HandlePingPong(const Frame& frame);
 
     std::string host_;
     uint16_t port_ = 0;
+    mutable std::mutex conn_mutex_;
     Connection::Ptr connection_;
     std::atomic<bool> connected_{false};
     std::thread read_thread_;
+    std::thread ping_thread_;
     FrameHandler frame_handler_;
+
+    std::atomic<uint64_t> last_pong_time_ms_{0};
 };
 
 } // namespace pmqueue

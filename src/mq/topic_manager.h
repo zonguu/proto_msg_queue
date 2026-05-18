@@ -95,6 +95,12 @@ public:
     // 检查是否存在
     bool HasTopic(const std::string& topic_name) const;
 
+    /**
+     * @brief 根据连接 ID 取消所有订阅（广播 + 消费者组）
+     * @return 是否清理了至少一个订阅
+     */
+    bool UnsubscribeByConnId(ConnectionId conn_id);
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, TopicInfo> topics_;

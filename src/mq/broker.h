@@ -6,6 +6,7 @@
 
 #include "common/types.h"
 #include "common/non_copyable.h"
+#include "common/rate_limiter.h"
 #include "storage/message_store.h"
 #include "mq/topic_manager.h"
 #include "network/tcp_server.h"
@@ -20,6 +21,12 @@ namespace pmqueue {
  * 支持两种消费模式：
  * 1. 广播模式：每个订阅者独立消费全部消息
  * 2. 消费者组模式：组内成员轮询分摊消息，每条消息只被组内一个消费者处理
+ * 
+ * 新增特性：
+ * - 批量读写
+ * - 心跳与连接保活
+ * - 背压与限流
+ * - 消息 TTL
  */
 class Broker : public NonCopyable {
 public:
@@ -37,18 +44,26 @@ public:
 private:
     void OnFrameReceived(const Connection::Ptr& conn, const Frame& frame);
     void HandlePublish(const Connection::Ptr& conn, const Frame& frame);
+    void HandleBatchPublish(const Connection::Ptr& conn, const Frame& frame);
     void HandleSubscribe(const Connection::Ptr& conn, const Frame& frame);
     void HandleUnsubscribe(const Connection::Ptr& conn, const Frame& frame);
     void HandlePull(const Connection::Ptr& conn, const Frame& frame);
     void HandleAck(const Connection::Ptr& conn, const Frame& frame);
     void HandlePullDlq(const Connection::Ptr& conn, const Frame& frame);
+    void HandlePing(const Connection::Ptr& conn, const Frame& frame);
 
     void SendResponse(const Connection::Ptr& conn, bool success, const std::string& error_msg = "", MessageId msg_id = 0);
     void SendPushMessage(const Connection::Ptr& conn, const StoredMessage& msg, const std::string& topic);
+    void SendBatchPushMessage(const Connection::Ptr& conn, const std::vector<StoredMessage>& messages, const std::string& topic);
+
+    void OnConnectionClosed(ConnectionId conn_id);
 
     std::unique_ptr<IMessageStore> store_;
     TopicManager topic_manager_;
     TcpServer server_;
+
+    // 全局发布限流
+    std::unique_ptr<TokenBucket> global_publish_limiter_;
 };
 
 } // namespace pmqueue

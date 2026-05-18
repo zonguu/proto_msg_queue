@@ -26,6 +26,7 @@ struct StoredMessage {
     Payload payload;
     uint64_t timestamp;
     uint32_t retry_count = 0;  // 当前重试次数
+    uint64_t expires_at = 0;   // 过期时间戳（毫秒级 Unix 时间，0 表示永不过期）
 };
 
 /**
@@ -44,7 +45,7 @@ public:
     /**
      * @brief 发布消息到指定 Topic
      */
-    virtual bool Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id) = 0;
+    virtual bool Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id, uint32_t ttl_ms = 0) = 0;
 
     /**
      * @brief 拉取消息

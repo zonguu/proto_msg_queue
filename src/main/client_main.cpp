@@ -10,11 +10,12 @@
 void PrintUsage(const char* prog) {
     std::cout << "Usage: " << prog << " <host> <port> <command> [args...]" << std::endl;
     std::cout << "Commands:" << std::endl;
-    std::cout << "  publish <topic> <message>              - Publish a message" << std::endl;
-    std::cout << "  subscribe <topic> <sub_id> [group_id]  - Subscribe to a topic" << std::endl;
-    std::cout << "  unsubscribe <topic> <sub_id> [group_id]- Unsubscribe from a topic" << std::endl;
-    std::cout << "  pull <topic> <sub_id> [group_id] [max] - Pull messages" << std::endl;
-    std::cout << "  ack <topic> <sub_id> <msg_id> [group]  - Ack a message" << std::endl;
+    std::cout << "  publish <topic> <message> [ttl_ms]       - Publish a message" << std::endl;
+    std::cout << "  batch_publish <topic> <msg1> [msg2]...   - Batch publish messages" << std::endl;
+    std::cout << "  subscribe <topic> <sub_id> [group_id]    - Subscribe to a topic" << std::endl;
+    std::cout << "  unsubscribe <topic> <sub_id> [group_id]  - Unsubscribe from a topic" << std::endl;
+    std::cout << "  pull <topic> <sub_id> [group_id] [max]   - Pull messages" << std::endl;
+    std::cout << "  ack <topic> <sub_id> <msg_id> [group]    - Ack a message" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -47,6 +48,16 @@ int main(int argc, char* argv[]) {
                           << " retry=" << push.retry_count()
                           << " payload=" << push.payload() << std::endl;
             }
+        } else if (frame.msg_type == pmqueue::FrameMessageType::BatchPush) {
+            pmqueue::BatchPushMessage batch;
+            if (batch.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+                for (const auto& push : batch.messages()) {
+                    std::cout << "[BATCH_PUSH] topic=" << push.topic()
+                              << " msg_id=" << push.message_id()
+                              << " retry=" << push.retry_count()
+                              << " payload=" << push.payload() << std::endl;
+                }
+            }
         }
     });
 
@@ -64,8 +75,18 @@ int main(int argc, char* argv[]) {
         pmqueue::PublishRequest req;
         req.set_topic(argv[4]);
         req.set_payload(argv[5]);
+        if (argc >= 7) req.set_ttl_ms(static_cast<uint32_t>(std::atoi(argv[6])));
         req.SerializeToString(&data);
         frame.msg_type = pmqueue::FrameMessageType::Publish;
+    } else if (cmd == "batch_publish" && argc >= 6) {
+        pmqueue::BatchPublishRequest batch_req;
+        for (int i = 5; i < argc; ++i) {
+            auto* msg = batch_req.add_messages();
+            msg->set_topic(argv[4]);
+            msg->set_payload(argv[i]);
+        }
+        batch_req.SerializeToString(&data);
+        frame.msg_type = pmqueue::FrameMessageType::BatchPublish;
     } else if (cmd == "subscribe" && argc >= 6) {
         pmqueue::SubscribeRequest req;
         req.set_topic(argv[4]);

@@ -13,12 +13,27 @@ enum MessageType {
     RESPONSE = 6;      // 通用响应
     PUSH = 7;          // 服务端推送
     PULL_DLQ = 8;      // 拉取死信队列
+    BATCH_PUBLISH = 9; // 批量发布
+    BATCH_PUSH = 10;   // 批量推送
+    PING = 11;         // 心跳请求
+    PONG = 12;         // 心跳响应
 }
 
 // 发布消息
 message PublishRequest {
     string topic = 1;
     bytes payload = 2;
+    uint32 ttl_ms = 3; // 消息存活时间，0 表示永不过期
+}
+
+// 批量发布消息
+message BatchPublishRequest {
+    repeated PublishRequest messages = 1;
+}
+
+// 批量推送消息（服务端 -> 客户端）
+message BatchPushMessage {
+    repeated PushMessage messages = 1;
 }
 
 // 订阅请求
@@ -78,5 +93,7 @@ message Message {
         AckRequest ack = 6;
         Response response = 7;
         PushMessage push = 8;
+        BatchPublishRequest batch_publish = 9;
+        BatchPushMessage batch_push = 10;
     }
 }

@@ -48,44 +48,130 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     ConnectionId conn_id = 1;
-    connection_ = std::make_shared<Connection>(conn_id, fd);
-    connection_->SetFrameHandler([this](const Connection::Ptr&, const Frame& frame) {
+    auto conn = std::make_shared<Connection>(conn_id, fd);
+    conn->SetFrameHandler([this](const Connection::Ptr&, const Frame& frame) {
+        // 先处理心跳
+        if (frame.msg_type == FrameMessageType::Ping) {
+            Frame pong;
+            pong.msg_type = FrameMessageType::Pong;
+            SendFrame(pong);
+            return;
+        }
+        if (frame.msg_type == FrameMessageType::Pong) {
+            auto now = std::chrono::steady_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            last_pong_time_ms_.store(static_cast<uint64_t>(ms), std::memory_order_relaxed);
+            // 继续传递给用户 handler，以便测试和应用层感知
+            if (frame_handler_) {
+                frame_handler_(frame);
+            }
+            return;
+        }
         if (frame_handler_) {
             frame_handler_(frame);
         }
     });
 
+    {
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        connection_ = conn;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    last_pong_time_ms_.store(static_cast<uint64_t>(ms), std::memory_order_relaxed);
+
     connected_ = true;
     read_thread_ = std::thread(&TcpClient::ReadLoop, this);
+    ping_thread_ = std::thread(&TcpClient::PingLoop, this);
     return true;
 }
 
 void TcpClient::Disconnect() {
     connected_ = false;
-    if (connection_) {
-        connection_->Close();
-        connection_.reset();
+
+    {
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        if (connection_) {
+            connection_->Close();
+            connection_.reset();
+        }
     }
+
     if (read_thread_.joinable()) {
         read_thread_.join();
+    }
+    if (ping_thread_.joinable()) {
+        ping_thread_.join();
     }
 }
 
 bool TcpClient::SendFrame(const Frame& frame) {
-    if (!connected_.load() || !connection_) {
+    if (!connected_.load()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    if (!connection_ || connection_->IsClosed()) {
         return false;
     }
     return connection_->SendFrame(frame);
 }
 
 bool TcpClient::IsConnected() const {
-    return connected_.load() && connection_ && !connection_->IsClosed();
+    if (!connected_.load()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    return connection_ && !connection_->IsClosed();
 }
 
 void TcpClient::ReadLoop() {
-    while (connected_.load() && connection_ && !connection_->IsClosed()) {
-        connection_->OnRead();
+    while (connected_.load()) {
+        Connection::Ptr conn;
+        {
+            std::lock_guard<std::mutex> lock(conn_mutex_);
+            conn = connection_;
+        }
+        if (!conn || conn->IsClosed()) {
+            break;
+        }
+        conn->OnRead();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+void TcpClient::PingLoop() {
+    while (connected_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultPingIntervalMs));
+
+        if (!connected_.load()) {
+            break;
+        }
+
+        // 发送 Ping
+        Frame ping;
+        ping.msg_type = FrameMessageType::Ping;
+        if (!SendFrame(ping)) {
+            break;
+        }
+
+        // 检查是否长时间未收到 Pong
+        auto now = std::chrono::steady_clock::now();
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        auto last_pong = static_cast<int64_t>(last_pong_time_ms_.load(std::memory_order_relaxed));
+        if (now_ms - last_pong > static_cast<int64_t>(kDefaultHeartbeatTimeoutMs)) {
+            // 心跳超时，断开连接
+            Connection::Ptr conn;
+            {
+                std::lock_guard<std::mutex> lock(conn_mutex_);
+                conn = connection_;
+            }
+            if (conn) {
+                conn->Close();
+            }
+            break;
+        }
     }
 }
 

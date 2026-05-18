@@ -74,9 +74,25 @@ target_link_libraries(test_topic_manager PRIVATE pmqueue_core GTest::gtest_main)
 add_executable(test_integration test/test_integration.cpp)
 target_link_libraries(test_integration PRIVATE pmqueue_core GTest::gtest_main)
 
+add_executable(test_batch_publish test/test_batch_publish.cpp)
+target_link_libraries(test_batch_publish PRIVATE pmqueue_core GTest::gtest_main)
+
+add_executable(test_heartbeat test/test_heartbeat.cpp)
+target_link_libraries(test_heartbeat PRIVATE pmqueue_core GTest::gtest_main)
+
+add_executable(test_rate_limiter test/test_rate_limiter.cpp)
+target_link_libraries(test_rate_limiter PRIVATE pmqueue_core GTest::gtest_main)
+
+add_executable(test_ttl test/test_ttl.cpp)
+target_link_libraries(test_ttl PRIVATE pmqueue_core GTest::gtest_main)
+
 # 注册测试
 add_test(NAME RingBufferTest COMMAND test_ring_buffer)
 add_test(NAME FrameCodecTest COMMAND test_frame_codec)
 add_test(NAME MessageStoreTest COMMAND test_message_store)
 add_test(NAME TopicManagerTest COMMAND test_topic_manager)
 add_test(NAME IntegrationTest COMMAND test_integration)
+add_test(NAME BatchPublishTest COMMAND test_batch_publish)
+add_test(NAME HeartbeatTest COMMAND test_heartbeat)
+add_test(NAME RateLimiterTest COMMAND test_rate_limiter)
+add_test(NAME TtlTest COMMAND test_ttl)

@@ -13,24 +13,31 @@ MemoryMessageStore::MemoryMessageStore(
     size_t default_buffer_size,
     uint32_t max_retry_count,
     uint32_t pending_timeout_ms,
-    uint32_t retry_interval_ms)
+    uint32_t retry_interval_ms,
+    uint32_t expiration_check_interval_ms)
     : default_buffer_size_(default_buffer_size)
     , max_retry_count_(max_retry_count)
     , pending_timeout_ms_(pending_timeout_ms)
     , retry_interval_ms_(retry_interval_ms)
+    , expiration_check_interval_ms_(expiration_check_interval_ms)
 {
-    // 启动后台重试线程
+    // 启动后台重试线程和过期清理线程
     retry_thread_ = std::thread(&MemoryMessageStore::RetryLoop, this);
+    expiration_thread_ = std::thread(&MemoryMessageStore::ExpirationLoop, this);
 }
 
 MemoryMessageStore::~MemoryMessageStore() {
     {
         std::lock_guard<std::mutex> lock(retry_mutex_);
-        stop_retry_thread_ = true;
+        stop_background_threads_ = true;
     }
     retry_cv_.notify_all();
+    expiration_cv_.notify_all();
     if (retry_thread_.joinable()) {
         retry_thread_.join();
+    }
+    if (expiration_thread_.joinable()) {
+        expiration_thread_.join();
     }
 }
 
@@ -71,7 +78,7 @@ bool MemoryMessageStore::HasTopic(const TopicName& topic) const {
 // 消息发布
 // ============================================================================
 
-bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id) {
+bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload, MessageId& out_msg_id, uint32_t ttl_ms) {
     TopicData* topic_data = nullptr;
     {
         std::lock_guard<std::mutex> lock(topics_mutex_);
@@ -90,13 +97,14 @@ bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload,
     // 分配消息 ID（原子操作，无锁）
     out_msg_id = topic_data->next_msg_id.fetch_add(1, std::memory_order_relaxed);
 
-    // 序列化消息：msg_id(8B) + timestamp(8B) + payload_size(4B) + payload(NB)
-    const uint64_t timestamp = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
+    // 计算过期时间
+    const uint64_t expires_at = (ttl_ms > 0) ? (GetCurrentTimeMs() + ttl_ms) : 0;
+
+    // 序列化消息：msg_id(8B) + timestamp(8B) + expires_at(8B) + payload_size(4B) + payload(NB)
+    const uint64_t timestamp = GetCurrentTimeMs();
 
     std::vector<uint8_t> serialized;
-    serialized.reserve(sizeof(MessageId) + sizeof(uint64_t) + sizeof(uint32_t) + payload.size());
+    serialized.reserve(sizeof(MessageId) + sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t) + payload.size());
 
     // msg_id (8 bytes, big-endian)
     for (int i = 7; i >= 0; --i) {
@@ -106,6 +114,11 @@ bool MemoryMessageStore::Publish(const TopicName& topic, const Payload& payload,
     // timestamp (8 bytes, big-endian)
     for (int i = 7; i >= 0; --i) {
         serialized.push_back(static_cast<uint8_t>((timestamp >> (i * 8)) & 0xFF));
+    }
+
+    // expires_at (8 bytes, big-endian)
+    for (int i = 7; i >= 0; --i) {
+        serialized.push_back(static_cast<uint8_t>((expires_at >> (i * 8)) & 0xFF));
     }
 
     // payload_size (4 bytes, big-endian)
@@ -159,12 +172,20 @@ std::vector<StoredMessage> MemoryMessageStore::Pull(
         offset = 1; // 从第一条消息开始
     }
 
-    // 从主日志中拉取消息（按 offset 顺序）
+    const uint64_t now_ms = GetCurrentTimeMs();
+
+    // 从主日志中拉取消息（按 offset 顺序），跳过过期消息
     for (const auto& msg : topic_data->message_log) {
         if (result.size() >= max_messages) {
             break;
         }
         if (msg.id >= offset) {
+            // 检查是否已过期
+            if (msg.expires_at > 0 && now_ms > msg.expires_at) {
+                // 过期消息，直接推进 offset
+                offset = msg.id + 1;
+                continue;
+            }
             // 检查是否已经在 pending 中（避免重复投递）
             auto& pending_map = topic_data->pending_acks[consumer_key];
             if (pending_map.find(msg.id) == pending_map.end()) {
@@ -184,6 +205,11 @@ std::vector<StoredMessage> MemoryMessageStore::Pull(
     for (auto it = topic_data->retry_queue.begin(); it != topic_data->retry_queue.end(); ) {
         if (result.size() >= max_messages) {
             break;
+        }
+        // 跳过过期重试消息
+        if (it->expires_at > 0 && now_ms > it->expires_at) {
+            it = topic_data->retry_queue.erase(it);
+            continue;
         }
         auto& pending_map = topic_data->pending_acks[consumer_key];
         if (pending_map.find(it->id) == pending_map.end()) {
@@ -274,7 +300,8 @@ void MemoryMessageStore::DrainRingBuffer(TopicData& topic_data) {
         }
 
         const auto& buf = data_opt.value();
-        if (buf.size() < sizeof(MessageId) + sizeof(uint64_t) + sizeof(uint32_t)) {
+        // msg_id(8) + timestamp(8) + expires_at(8) + payload_size(4)
+        if (buf.size() < sizeof(MessageId) + sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint32_t)) {
             continue; // 数据损坏，跳过
         }
 
@@ -290,6 +317,12 @@ void MemoryMessageStore::DrainRingBuffer(TopicData& topic_data) {
         uint64_t timestamp = 0;
         for (size_t j = 0; j < sizeof(uint64_t); ++j) {
             timestamp = (timestamp << 8) | buf[offset++];
+        }
+
+        // 解析 expires_at
+        uint64_t expires_at = 0;
+        for (size_t j = 0; j < sizeof(uint64_t); ++j) {
+            expires_at = (expires_at << 8) | buf[offset++];
         }
 
         // 解析 payload_size
@@ -308,6 +341,7 @@ void MemoryMessageStore::DrainRingBuffer(TopicData& topic_data) {
         msg.payload.assign(buf.begin() + offset, buf.begin() + offset + payload_size);
         msg.timestamp = timestamp;
         msg.retry_count = 0;
+        msg.expires_at = expires_at;
 
         topic_data.message_log.push_back(std::move(msg));
     }
@@ -317,10 +351,10 @@ void MemoryMessageStore::RetryLoop() {
     while (true) {
         std::unique_lock<std::mutex> lock(retry_mutex_);
         retry_cv_.wait_for(lock, std::chrono::milliseconds(retry_interval_ms_), [this] {
-            return stop_retry_thread_.load();
+            return stop_background_threads_.load();
         });
         
-        if (stop_retry_thread_.load()) {
+        if (stop_background_threads_.load()) {
             break;
         }
 
@@ -339,10 +373,37 @@ void MemoryMessageStore::RetryLoop() {
     }
 }
 
+void MemoryMessageStore::ExpirationLoop() {
+    while (true) {
+        std::unique_lock<std::mutex> lock(expiration_mutex_);
+        expiration_cv_.wait_for(lock, std::chrono::milliseconds(expiration_check_interval_ms_), [this] {
+            return stop_background_threads_.load();
+        });
+        
+        if (stop_background_threads_.load()) {
+            break;
+        }
+
+        // 扫描所有 Topic 的过期消息
+        std::vector<TopicData*> topic_data_list;
+        {
+            std::lock_guard<std::mutex> topics_lock(topics_mutex_);
+            for (auto& [name, data] : topics_) {
+                topic_data_list.push_back(data.get());
+            }
+        }
+
+        for (auto* topic_data : topic_data_list) {
+            ExpireTopicMessages(*topic_data);
+        }
+    }
+}
+
 void MemoryMessageStore::ProcessPendingRetries(TopicData& topic_data) {
     std::lock_guard<std::mutex> lock(topic_data.mutex);
     
     const auto now = std::chrono::steady_clock::now();
+    const uint64_t now_ms = GetCurrentTimeMs();
     
     // 遍历所有消费者的 pending 消息
     std::vector<std::string> empty_consumer_keys;
@@ -356,6 +417,12 @@ void MemoryMessageStore::ProcessPendingRetries(TopicData& topic_data) {
             if (elapsed_ms >= static_cast<int64_t>(pending_timeout_ms_)) {
                 // 超时未 ACK
                 to_remove.push_back(msg_id);
+                
+                // 检查消息是否已过期
+                if (pending.msg.expires_at > 0 && now_ms > pending.msg.expires_at) {
+                    // 已过期，不进入重试队列，直接丢弃
+                    continue;
+                }
                 
                 if (pending.msg.retry_count >= max_retry_count_) {
                     // 超过最大重试次数，转入 DLQ
@@ -394,12 +461,66 @@ void MemoryMessageStore::ProcessPendingRetries(TopicData& topic_data) {
     }
 }
 
+void MemoryMessageStore::ExpireTopicMessages(TopicData& topic_data) {
+    std::lock_guard<std::mutex> lock(topic_data.mutex);
+    
+    const uint64_t now_ms = GetCurrentTimeMs();
+    
+    // 清理 message_log 中的过期消息（重建 deque，保留未过期消息）
+    std::deque<StoredMessage> new_log;
+    for (auto& msg : topic_data.message_log) {
+        if (msg.expires_at == 0 || now_ms <= msg.expires_at) {
+            new_log.push_back(std::move(msg));
+        }
+    }
+    topic_data.message_log = std::move(new_log);
+    
+    // 清理 retry_queue 中的过期消息
+    topic_data.retry_queue.erase(
+        std::remove_if(topic_data.retry_queue.begin(), topic_data.retry_queue.end(),
+            [now_ms](const StoredMessage& m) { return m.expires_at > 0 && now_ms > m.expires_at; }),
+        topic_data.retry_queue.end());
+    
+    // 清理 pending_acks 中的过期消息（视为自动丢弃）
+    std::vector<std::string> empty_consumer_keys;
+    for (auto& [consumer_key, pending_map] : topic_data.pending_acks) {
+        std::vector<MessageId> to_remove;
+        for (auto& [msg_id, pending] : pending_map) {
+            if (pending.msg.expires_at > 0 && now_ms > pending.msg.expires_at) {
+                to_remove.push_back(msg_id);
+            }
+        }
+        for (MessageId msg_id : to_remove) {
+            pending_map.erase(msg_id);
+        }
+        if (pending_map.empty()) {
+            empty_consumer_keys.push_back(consumer_key);
+        }
+    }
+    for (const auto& key : empty_consumer_keys) {
+        topic_data.pending_acks.erase(key);
+    }
+}
+
 TopicName MemoryMessageStore::MakeDlqName(const TopicName& topic) {
     return "__dlq." + topic;
 }
 
 std::string MemoryMessageStore::MakeConsumerKey(bool is_group, const std::string& id) {
     return is_group ? ("grp:" + id) : ("sub:" + id);
+}
+
+uint64_t MemoryMessageStore::GetCurrentTimeMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+bool MemoryMessageStore::IsMessageExpired(const StoredMessage& msg) {
+    if (msg.expires_at == 0) {
+        return false;
+    }
+    return GetCurrentTimeMs() > msg.expires_at;
 }
 
 } // namespace pmqueue

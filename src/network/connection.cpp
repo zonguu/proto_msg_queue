@@ -13,6 +13,7 @@ Connection::Connection(ConnectionId id, int fd)
     : id_(id), fd_(fd) {
     read_buffer_.reserve(4096);
     write_buffer_.reserve(4096);
+    UpdateLastActiveTime();
 }
 
 Connection::~Connection() {
@@ -27,6 +28,12 @@ bool Connection::SendFrame(const Frame& frame) {
     auto encoded = FrameCodec::Encode(frame);
 
     std::lock_guard<std::mutex> lock(write_buffer_mutex_);
+
+    // 写缓冲区背压：超过上限则拒绝写入
+    if (write_buffer_.size() + encoded.size() > kMaxWriteBufferSize) {
+        return false;
+    }
+
     write_buffer_.insert(write_buffer_.end(), encoded.begin(), encoded.end());
 
     // 尝试立即发送
@@ -74,6 +81,8 @@ void Connection::OnRead() {
         }
     }
 
+    UpdateLastActiveTime();
+
     // 解析帧
     while (true) {
         size_t consumed = 0;
@@ -109,6 +118,36 @@ void Connection::Close() {
         if (close_handler_) {
             close_handler_(shared_from_this());
         }
+    }
+}
+
+void Connection::UpdateLastActiveTime() {
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    last_active_time_ms_.store(static_cast<uint64_t>(ms), std::memory_order_relaxed);
+}
+
+std::chrono::steady_clock::time_point Connection::GetLastActiveTime() const {
+    auto ms = last_active_time_ms_.load(std::memory_order_relaxed);
+    return std::chrono::steady_clock::time_point(
+        std::chrono::milliseconds(ms));
+}
+
+bool Connection::AcquirePublishPermit(uint32_t tokens) {
+    std::lock_guard<std::mutex> lock(limiter_mutex_);
+    if (!publish_limiter_) {
+        // 默认限流
+        publish_limiter_ = std::make_unique<TokenBucket>(kDefaultConnPublishRate, kDefaultRateLimitBurst);
+    }
+    return publish_limiter_->Acquire(tokens);
+}
+
+void Connection::SetPublishRateLimit(uint32_t rate_per_second, uint32_t burst_size) {
+    std::lock_guard<std::mutex> lock(limiter_mutex_);
+    if (!publish_limiter_) {
+        publish_limiter_ = std::make_unique<TokenBucket>(rate_per_second, burst_size);
+    } else {
+        publish_limiter_->SetRate(rate_per_second, burst_size);
     }
 }
 

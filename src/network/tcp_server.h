@@ -19,6 +19,7 @@ namespace pmqueue {
 class TcpServer : public NonCopyable {
 public:
     using FrameHandler = std::function<void(const Connection::Ptr&, const Frame&)>;
+    using IdleTimeoutHandler = std::function<void(ConnectionId)>;
 
     explicit TcpServer(uint16_t port);
     ~TcpServer();
@@ -27,6 +28,7 @@ public:
     void Stop();
 
     void SetFrameHandler(FrameHandler handler) { frame_handler_ = std::move(handler); }
+    void SetIdleTimeoutHandler(IdleTimeoutHandler handler) { idle_timeout_handler_ = std::move(handler); }
 
     // 发送帧到指定连接
     bool SendTo(ConnectionId conn_id, const Frame& frame);
@@ -39,6 +41,7 @@ public:
 private:
     void AcceptLoop();
     void EventLoop();
+    void HeartbeatLoop();
 
     uint16_t port_;
     int listen_fd_ = -1;
@@ -47,12 +50,14 @@ private:
 
     std::thread accept_thread_;
     std::thread event_thread_;
+    std::thread heartbeat_thread_;
 
     std::mutex connections_mutex_;
     std::unordered_map<ConnectionId, Connection::Ptr> connections_;
     std::atomic<ConnectionId> next_conn_id_{1};
 
     FrameHandler frame_handler_;
+    IdleTimeoutHandler idle_timeout_handler_;
 };
 
 } // namespace pmqueue
