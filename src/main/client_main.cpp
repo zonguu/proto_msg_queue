@@ -17,6 +17,9 @@ void PrintUsage(const char* prog) {
     std::cout << "  unsubscribe <topic> <sub_id> [group_id]  - Unsubscribe from a topic" << std::endl;
     std::cout << "  pull <topic> <sub_id> [group_id] [max]   - Pull messages" << std::endl;
     std::cout << "  ack <topic> <sub_id> <msg_id> [group]    - Ack a message" << std::endl;
+    std::cout << "  admin <command> [topic]                    - Admin command" << std::endl;
+    std::cout << "    Commands: list_topics, get_topic_info, delete_topic, get_stats," << std::endl;
+    std::cout << "              get_connections, cleanup_topic" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -60,6 +63,18 @@ int main(int argc, char* argv[]) {
                           << " retry=" << push.retry_count()
                           << " compressed=" << push.compressed()
                           << " payload=" << payload << std::endl;
+            }
+        } else if (frame.msg_type == pmqueue::FrameMessageType::Admin) {
+            pmqueue::AdminResponse resp;
+            if (resp.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+                std::cout << "[ADMIN] success=" << resp.success();
+                if (!resp.error_msg().empty()) {
+                    std::cout << " error=" << resp.error_msg();
+                }
+                if (!resp.json_result().empty()) {
+                    std::cout << " result=" << resp.json_result();
+                }
+                std::cout << std::endl;
             }
         } else if (frame.msg_type == pmqueue::FrameMessageType::BatchPush) {
             pmqueue::BatchPushMessage batch;
@@ -145,6 +160,30 @@ int main(int argc, char* argv[]) {
         if (argc >= 8) req.set_group_id(argv[7]);
         req.SerializeToString(&data);
         frame.msg_type = pmqueue::FrameMessageType::Ack;
+    } else if (cmd == "admin" && argc >= 5) {
+        pmqueue::AdminRequest req;
+        std::string admin_cmd = argv[4];
+        if (admin_cmd == "list_topics") {
+            req.set_command(pmqueue::ADMIN_LIST_TOPICS);
+        } else if (admin_cmd == "get_topic_info") {
+            req.set_command(pmqueue::ADMIN_GET_TOPIC_INFO);
+            if (argc >= 6) req.set_topic(argv[5]);
+        } else if (admin_cmd == "delete_topic") {
+            req.set_command(pmqueue::ADMIN_DELETE_TOPIC);
+            if (argc >= 6) req.set_topic(argv[5]);
+        } else if (admin_cmd == "get_stats") {
+            req.set_command(pmqueue::ADMIN_GET_STATS);
+        } else if (admin_cmd == "get_connections") {
+            req.set_command(pmqueue::ADMIN_GET_CONNECTIONS);
+        } else if (admin_cmd == "cleanup_topic") {
+            req.set_command(pmqueue::ADMIN_CLEANUP_TOPIC);
+            if (argc >= 6) req.set_topic(argv[5]);
+        } else {
+            std::cerr << "Unknown admin command: " << admin_cmd << std::endl;
+            return 1;
+        }
+        req.SerializeToString(&data);
+        frame.msg_type = pmqueue::FrameMessageType::Admin;
     } else {
         PrintUsage(argv[0]);
         return 1;

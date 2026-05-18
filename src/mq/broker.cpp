@@ -62,7 +62,7 @@ void Broker::OnFrameReceived(const Connection::Ptr& conn, const Frame& frame) {
             if (config.batch_publish_enabled) {
                 HandleBatchPublish(conn, frame);
             } else {
-                SendResponse(conn, false, "Batch publish is disabled");
+                SendResponse(conn, ErrorCode::InvalidRequest, "Batch publish is disabled");
             }
             break;
         case FrameMessageType::Subscribe:
@@ -82,9 +82,12 @@ void Broker::OnFrameReceived(const Connection::Ptr& conn, const Frame& frame) {
                 HandlePing(conn, frame);
             }
             break;
+        case FrameMessageType::Admin:
+            HandleAdmin(conn, frame);
+            break;
         case FrameMessageType::Unknown:
         default:
-            SendResponse(conn, false, "Unknown message type");
+            SendResponse(conn, ErrorCode::Unknown, "Unknown message type");
             break;
     }
 }
@@ -92,7 +95,7 @@ void Broker::OnFrameReceived(const Connection::Ptr& conn, const Frame& frame) {
 void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
     pmqueue::PublishRequest req;
     if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
-        SendResponse(conn, false, "Failed to parse publish request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Failed to parse publish request");
         return;
     }
 
@@ -109,13 +112,13 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
 
     // 单连接限流检查
     if (config.rate_limit_enabled && !conn->AcquirePublishPermit()) {
-        SendResponse(conn, false, "Rate limit exceeded");
+        SendResponse(conn, ErrorCode::RateLimitExceeded, "Rate limit exceeded");
         return;
     }
 
     // 全局限流检查
     if (config.rate_limit_enabled && global_publish_limiter_ && !global_publish_limiter_->Acquire()) {
-        SendResponse(conn, false, "Global rate limit exceeded");
+        SendResponse(conn, ErrorCode::RateLimitExceeded, "Global rate limit exceeded");
         return;
     }
 
@@ -139,7 +142,7 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
     bool success = store_->Publish(req.topic(), payload, msg_id, ttl_ms);
 
     if (!success) {
-        SendResponse(conn, false, "Backpressure: buffer full", 0);
+        SendResponse(conn, ErrorCode::BufferFull, "Backpressure: buffer full", 0);
         return;
     }
 
@@ -219,12 +222,12 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
 void Broker::HandleBatchPublish(const Connection::Ptr& conn, const Frame& frame) {
     pmqueue::BatchPublishRequest req;
     if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
-        SendResponse(conn, false, "Failed to parse batch publish request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Failed to parse batch publish request");
         return;
     }
 
     if (req.messages_size() == 0) {
-        SendResponse(conn, false, "Empty batch publish request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Empty batch publish request");
         return;
     }
 
@@ -232,19 +235,19 @@ void Broker::HandleBatchPublish(const Connection::Ptr& conn, const Frame& frame)
 
     // 批量限流检查
     if (config.rate_limit_enabled && !conn->AcquirePublishPermit(static_cast<uint32_t>(req.messages_size()))) {
-        SendResponse(conn, false, "Rate limit exceeded");
+        SendResponse(conn, ErrorCode::RateLimitExceeded, "Rate limit exceeded");
         return;
     }
 
     if (config.rate_limit_enabled && global_publish_limiter_ &&
         !global_publish_limiter_->Acquire(static_cast<uint32_t>(req.messages_size()))) {
-        SendResponse(conn, false, "Global rate limit exceeded");
+        SendResponse(conn, ErrorCode::RateLimitExceeded, "Global rate limit exceeded");
         return;
     }
 
     // 检查批量大小限制
     if (static_cast<uint32_t>(req.messages_size()) > config.max_batch_size) {
-        SendResponse(conn, false, "Batch size exceeds limit");
+        SendResponse(conn, ErrorCode::BatchSizeExceeded, "Batch size exceeds limit");
         return;
     }
 
@@ -284,7 +287,7 @@ void Broker::HandleBatchPublish(const Connection::Ptr& conn, const Frame& frame)
     }
 
     if (!any_success) {
-        SendResponse(conn, false, "Backpressure: buffer full", 0);
+        SendResponse(conn, ErrorCode::BufferFull, "Backpressure: buffer full", 0);
         return;
     }
 
@@ -398,7 +401,7 @@ void Broker::HandleBatchPublish(const Connection::Ptr& conn, const Frame& frame)
 void Broker::HandleSubscribe(const Connection::Ptr& conn, const Frame& frame) {
     pmqueue::SubscribeRequest req;
     if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
-        SendResponse(conn, false, "Failed to parse subscribe request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Failed to parse subscribe request");
         return;
     }
 
@@ -411,24 +414,24 @@ void Broker::HandleSubscribe(const Connection::Ptr& conn, const Frame& frame) {
         store_->CreateTopic(req.topic());
     }
 
-    SendResponse(conn, success, success ? "" : "Already subscribed");
+    SendResponse(conn, success ? ErrorCode::Success : ErrorCode::AlreadySubscribed, success ? "" : "Already subscribed");
 }
 
 void Broker::HandleUnsubscribe(const Connection::Ptr& conn, const Frame& frame) {
     pmqueue::UnsubscribeRequest req;
     if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
-        SendResponse(conn, false, "Failed to parse unsubscribe request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Failed to parse unsubscribe request");
         return;
     }
 
     bool success = topic_manager_.Unsubscribe(req.topic(), req.subscriber_id(), req.group_id());
-    SendResponse(conn, success, success ? "" : "Not subscribed");
+    SendResponse(conn, success ? ErrorCode::Success : ErrorCode::NotSubscribed, success ? "" : "Not subscribed");
 }
 
 void Broker::HandlePull(const Connection::Ptr& conn, const Frame& frame) {
     pmqueue::PullRequest req;
     if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
-        SendResponse(conn, false, "Failed to parse pull request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Failed to parse pull request");
         return;
     }
 
@@ -454,7 +457,7 @@ void Broker::HandlePull(const Connection::Ptr& conn, const Frame& frame) {
 void Broker::HandleAck(const Connection::Ptr& conn, const Frame& frame) {
     pmqueue::AckRequest req;
     if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
-        SendResponse(conn, false, "Failed to parse ack request");
+        SendResponse(conn, ErrorCode::InvalidRequest, "Failed to parse ack request");
         return;
     }
 
@@ -462,7 +465,7 @@ void Broker::HandleAck(const Connection::Ptr& conn, const Frame& frame) {
     const std::string& consumer_id = is_group ? req.group_id() : req.subscriber_id();
 
     bool success = store_->Ack(req.topic(), consumer_id, req.message_id(), is_group);
-    SendResponse(conn, success);
+    SendResponse(conn, success ? ErrorCode::Success : ErrorCode::MessageNotFound, success ? "" : "Message not found");
 }
 
 void Broker::HandlePing(const Connection::Ptr& conn, const Frame& /*frame*/) {
@@ -476,6 +479,7 @@ void Broker::SendResponse(const Connection::Ptr& conn, bool success, const std::
     resp.set_success(success);
     resp.set_error_msg(error_msg);
     resp.set_message_id(msg_id);
+    resp.set_error_code(success ? 0 : static_cast<uint32_t>(ErrorCode::Unknown));
 
     std::string resp_data;
     resp.SerializeToString(&resp_data);
@@ -484,6 +488,118 @@ void Broker::SendResponse(const Connection::Ptr& conn, bool success, const std::
     frame.msg_type = FrameMessageType::Response;
     frame.payload.assign(resp_data.begin(), resp_data.end());
     conn->SendFrame(frame);
+}
+
+void Broker::SendResponse(const Connection::Ptr& conn, ErrorCode error_code, const std::string& error_msg, MessageId msg_id) {
+    pmqueue::Response resp;
+    bool success = (error_code == ErrorCode::Success);
+    resp.set_success(success);
+    resp.set_error_msg(error_msg.empty() ? ErrorCodeToString(error_code) : error_msg);
+    resp.set_message_id(msg_id);
+    resp.set_error_code(static_cast<uint32_t>(error_code));
+
+    std::string resp_data;
+    resp.SerializeToString(&resp_data);
+
+    Frame frame;
+    frame.msg_type = FrameMessageType::Response;
+    frame.payload.assign(resp_data.begin(), resp_data.end());
+    conn->SendFrame(frame);
+}
+
+void Broker::SendAdminResponse(const Connection::Ptr& conn, bool success, const std::string& error_msg, const std::string& json_result) {
+    pmqueue::AdminResponse resp;
+    resp.set_success(success);
+    resp.set_error_msg(error_msg);
+    resp.set_json_result(json_result);
+
+    std::string resp_data;
+    resp.SerializeToString(&resp_data);
+
+    Frame frame;
+    frame.msg_type = FrameMessageType::Admin;
+    frame.payload.assign(resp_data.begin(), resp_data.end());
+    conn->SendFrame(frame);
+}
+
+void Broker::HandleAdmin(const Connection::Ptr& conn, const Frame& frame) {
+    pmqueue::AdminRequest req;
+    if (!req.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+        SendAdminResponse(conn, false, "Failed to parse admin request");
+        return;
+    }
+
+    switch (req.command()) {
+        case pmqueue::ADMIN_LIST_TOPICS: {
+            auto topics = topic_manager_.GetAllTopics();
+            std::string json = "[\"";
+            for (size_t i = 0; i < topics.size(); ++i) {
+                if (i > 0) json += "\",\"";
+                json += topics[i].name;
+            }
+            json += "\"]";
+            SendAdminResponse(conn, true, "", "{\"topics\":" + json + "}");
+            break;
+        }
+
+        case pmqueue::ADMIN_GET_TOPIC_INFO: {
+            if (req.topic().empty()) {
+                SendAdminResponse(conn, false, "Topic name required");
+                return;
+            }
+            auto subscribers = topic_manager_.GetSubscribers(req.topic());
+            auto groups = topic_manager_.GetConsumerGroups(req.topic());
+            bool has_topic = topic_manager_.HasTopic(req.topic());
+            std::string json = "{\"topic\":\"" + req.topic() + "\"";
+            json += ",\"exists\":" + std::string(has_topic ? "true" : "false");
+            json += ",\"subscribers\":" + std::to_string(subscribers.size());
+            json += ",\"consumer_groups\":" + std::to_string(groups.size());
+            json += "}";
+            SendAdminResponse(conn, true, "", json);
+            break;
+        }
+
+        case pmqueue::ADMIN_DELETE_TOPIC: {
+            if (req.topic().empty()) {
+                SendAdminResponse(conn, false, "Topic name required");
+                return;
+            }
+            store_->DeleteTopic(req.topic());
+            topic_manager_.UnregisterTopic(req.topic());
+            SendAdminResponse(conn, true, "", "{\"deleted\":true}");
+            break;
+        }
+
+        case pmqueue::ADMIN_GET_STATS: {
+            auto topics = topic_manager_.GetAllTopics();
+            std::string json = "{\"topics\":" + std::to_string(topics.size());
+            json += ",\"dedup_producers\":" + std::to_string(dedup_window_.GetProducerCount());
+            json += "}";
+            SendAdminResponse(conn, true, "", json);
+            break;
+        }
+
+        case pmqueue::ADMIN_GET_CONNECTIONS: {
+            // TcpServer 不暴露连接数，返回 0 作为占位
+            SendAdminResponse(conn, true, "", "{\"connections\":0}");
+            break;
+        }
+
+        case pmqueue::ADMIN_CLEANUP_TOPIC: {
+            if (req.topic().empty()) {
+                SendAdminResponse(conn, false, "Topic name required");
+                return;
+            }
+            store_->DeleteTopic(req.topic());
+            store_->CreateTopic(req.topic());
+            SendAdminResponse(conn, true, "", "{\"cleaned\":true}");
+            break;
+        }
+
+        default:
+            SendAdminResponse(conn, false, "Unknown admin command");
+            break;
+    }
 }
 
 void Broker::SendPushMessage(const Connection::Ptr& conn, const StoredMessage& msg, const std::string& topic, bool compressed) {

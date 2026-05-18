@@ -139,25 +139,17 @@ void Connection::OnRead() {
 
     UpdateLastActiveTime();
 
-    // 解析帧
+    // 使用流式解码器解析帧
+    std::lock_guard<std::mutex> lock(read_buffer_mutex_);
+    streaming_codec_.AppendData(
+        reinterpret_cast<const uint8_t*>(read_buffer_.data()), read_buffer_.size());
+    read_buffer_.clear();
+
     while (true) {
-        size_t consumed = 0;
-        std::optional<Frame> frame;
-
-        {
-            std::lock_guard<std::mutex> lock(read_buffer_mutex_);
-            frame = FrameCodec::TryDecode(read_buffer_, consumed);
-        }
-
+        auto frame = streaming_codec_.TryParseFrame();
         if (!frame.has_value()) {
             break;
         }
-
-        {
-            std::lock_guard<std::mutex> lock(read_buffer_mutex_);
-            read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + consumed);
-        }
-
         if (frame_handler_) {
             frame_handler_(shared_from_this(), frame.value());
         }

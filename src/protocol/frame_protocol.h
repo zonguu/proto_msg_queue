@@ -25,6 +25,7 @@ enum class FrameMessageType : uint8_t {
     BatchPush = 10,
     Ping = 11,
     Pong = 12,
+    Admin = 13,
 };
 
 // 帧结构

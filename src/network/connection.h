@@ -14,6 +14,7 @@
 #include "common/non_copyable.h"
 #include "common/rate_limiter.h"
 #include "protocol/frame_protocol.h"
+#include "protocol/streaming_frame_codec.h"
 
 namespace pmqueue {
 
@@ -58,6 +59,7 @@ private:
 
     std::mutex read_buffer_mutex_;
     std::vector<uint8_t> read_buffer_;
+    StreamingFrameCodec streaming_codec_;
 
     std::mutex write_buffer_mutex_;
     std::vector<uint8_t> write_buffer_;

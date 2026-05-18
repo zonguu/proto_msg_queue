@@ -17,6 +17,7 @@ enum MessageType {
     BATCH_PUSH = 10;   // 批量推送
     PING = 11;         // 心跳请求
     PONG = 12;         // 心跳响应
+    ADMIN = 13;        // 管理请求
 }
 
 // 发布消息
@@ -74,6 +75,7 @@ message Response {
     bool success = 1;
     string error_msg = 2;
     uint64 message_id = 3;
+    uint32 error_code = 4; // 标准化错误码（pmqueue::ErrorCode）
 }
 
 // 推送消息（服务端 -> 客户端）
@@ -100,4 +102,29 @@ message Message {
         BatchPublishRequest batch_publish = 9;
         BatchPushMessage batch_push = 10;
     }
+}
+
+// 管理命令类型
+enum AdminCommandType {
+    ADMIN_UNKNOWN = 0;
+    ADMIN_LIST_TOPICS = 1;
+    ADMIN_GET_TOPIC_INFO = 2;
+    ADMIN_DELETE_TOPIC = 3;
+    ADMIN_GET_STATS = 4;
+    ADMIN_GET_CONNECTIONS = 5;
+    ADMIN_CLEANUP_TOPIC = 6;
+}
+
+// 管理请求
+message AdminRequest {
+    AdminCommandType command = 1;
+    string topic = 2;
+    uint32 max_messages = 3;
+}
+
+// 管理响应
+message AdminResponse {
+    bool success = 1;
+    string error_msg = 2;
+    string json_result = 3;
 }

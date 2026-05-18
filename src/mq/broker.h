@@ -7,6 +7,7 @@
 #include "common/types.h"
 #include "common/config.h"
 #include "common/dedup_window.h"
+#include "common/error_code.h"
 #include "common/non_copyable.h"
 #include "common/rate_limiter.h"
 #include "storage/message_store.h"
@@ -58,8 +59,11 @@ private:
     void HandleAck(const Connection::Ptr& conn, const Frame& frame);
     void HandlePullDlq(const Connection::Ptr& conn, const Frame& frame);
     void HandlePing(const Connection::Ptr& conn, const Frame& frame);
+    void HandleAdmin(const Connection::Ptr& conn, const Frame& frame);
 
     void SendResponse(const Connection::Ptr& conn, bool success, const std::string& error_msg = "", MessageId msg_id = 0);
+    void SendResponse(const Connection::Ptr& conn, ErrorCode error_code, const std::string& error_msg = "", MessageId msg_id = 0);
+    void SendAdminResponse(const Connection::Ptr& conn, bool success, const std::string& error_msg = "", const std::string& json_result = "");
     void SendPushMessage(const Connection::Ptr& conn, const StoredMessage& msg, const std::string& topic, bool compressed);
     void SendBatchPushMessage(const Connection::Ptr& conn, const std::vector<StoredMessage>& messages, const std::string& topic, bool compressed);
 

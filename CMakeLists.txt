@@ -40,6 +40,7 @@ add_library(pmqueue_core STATIC
     src/common/dedup_window.cpp
     src/ring_buffer/spsc_ring_buffer.cpp
     src/protocol/frame_codec.cpp
+    src/protocol/streaming_frame_codec.cpp
     src/storage/memory_message_store.cpp
     src/network/tcp_server.cpp
     src/network/tcp_client.cpp
@@ -78,6 +79,8 @@ add_executable(test_all
     test/test_config.cpp
     test/test_zero_copy.cpp
     test/test_dedup.cpp
+    test/test_streaming_codec.cpp
+    test/test_admin.cpp
 )
 
 target_link_libraries(test_all PRIVATE pmqueue_core GTest::gtest_main)
