@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "common/config.h"
 #include "common/non_copyable.h"
 #include "mq/topic.h"
 
@@ -101,6 +102,11 @@ public:
      */
     bool UnsubscribeByConnId(ConnectionId conn_id);
 
+    // === Topic 级配置 ===
+    void SetTopicConfig(const std::string& topic_name, const TopicConfig& config);
+    TopicConfig GetTopicConfig(const std::string& topic_name) const;
+    bool HasTopicConfig(const std::string& topic_name) const;
+
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, TopicInfo> topics_;
@@ -108,6 +114,8 @@ private:
     std::unordered_map<std::string, std::vector<SubscriberInfo>> subscribers_;
     // 消费者组：topic -> {group_id -> ConsumerGroup}
     std::unordered_map<std::string, std::unordered_map<std::string, ConsumerGroup>> consumer_groups_;
+    // Topic 级配置
+    std::unordered_map<std::string, TopicConfig> topic_configs_;
 };
 
 } // namespace pmqueue

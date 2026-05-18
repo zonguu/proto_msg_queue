@@ -6,6 +6,7 @@
 #include "network/tcp_client.h"
 #include "protocol/frame_codec.h"
 #include "msg_queue.pb.h"
+#include "common/compression.h"
 
 void PrintUsage(const char* prog) {
     std::cout << "Usage: " << prog << " <host> <port> <command> [args...]" << std::endl;
@@ -43,19 +44,42 @@ int main(int argc, char* argv[]) {
         } else if (frame.msg_type == pmqueue::FrameMessageType::Push) {
             pmqueue::PushMessage push;
             if (push.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
+                std::string payload = push.payload();
+                // 如果消息被压缩，解压后展示
+                if (push.compressed()) {
+                    std::vector<uint8_t> compressed(push.payload().begin(), push.payload().end());
+                    auto decompressed = pmqueue::Decompress(compressed);
+                    if (!decompressed.empty()) {
+                        payload = std::string(decompressed.begin(), decompressed.end());
+                    } else {
+                        payload = "[decompress_failed]";
+                    }
+                }
                 std::cout << "[PUSH] topic=" << push.topic()
                           << " msg_id=" << push.message_id()
                           << " retry=" << push.retry_count()
-                          << " payload=" << push.payload() << std::endl;
+                          << " compressed=" << push.compressed()
+                          << " payload=" << payload << std::endl;
             }
         } else if (frame.msg_type == pmqueue::FrameMessageType::BatchPush) {
             pmqueue::BatchPushMessage batch;
             if (batch.ParseFromArray(frame.payload.data(), static_cast<int>(frame.payload.size()))) {
                 for (const auto& push : batch.messages()) {
+                    std::string payload = push.payload();
+                    if (push.compressed()) {
+                        std::vector<uint8_t> compressed(push.payload().begin(), push.payload().end());
+                        auto decompressed = pmqueue::Decompress(compressed);
+                        if (!decompressed.empty()) {
+                            payload = std::string(decompressed.begin(), decompressed.end());
+                        } else {
+                            payload = "[decompress_failed]";
+                        }
+                    }
                     std::cout << "[BATCH_PUSH] topic=" << push.topic()
                               << " msg_id=" << push.message_id()
                               << " retry=" << push.retry_count()
-                              << " payload=" << push.payload() << std::endl;
+                              << " compressed=" << push.compressed()
+                              << " payload=" << payload << std::endl;
                 }
             }
         }

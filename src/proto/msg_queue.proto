@@ -24,6 +24,7 @@ message PublishRequest {
     string topic = 1;
     bytes payload = 2;
     uint32 ttl_ms = 3; // 消息存活时间，0 表示永不过期
+    bool compressed = 4; // payload 是否已压缩
 }
 
 // 批量发布消息
@@ -80,6 +81,7 @@ message PushMessage {
     bytes payload = 3;
     uint64 timestamp = 4;
     uint32 retry_count = 5;    // 当前重试次数，0 表示首次投递
+    bool compressed = 6;       // payload 是否已压缩
 }
 
 // 通用消息包装

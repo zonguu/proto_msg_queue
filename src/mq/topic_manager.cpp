@@ -201,6 +201,25 @@ bool TopicManager::HasTopic(const std::string& topic_name) const {
     return topics_.find(topic_name) != topics_.end();
 }
 
+void TopicManager::SetTopicConfig(const std::string& topic_name, const TopicConfig& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    topic_configs_[topic_name] = config;
+}
+
+TopicConfig TopicManager::GetTopicConfig(const std::string& topic_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = topic_configs_.find(topic_name);
+    if (it != topic_configs_.end()) {
+        return it->second;
+    }
+    return TopicConfig{};
+}
+
+bool TopicManager::HasTopicConfig(const std::string& topic_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return topic_configs_.find(topic_name) != topic_configs_.end();
+}
+
 bool TopicManager::UnsubscribeByConnId(ConnectionId conn_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     bool removed_any = false;

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "common/config.h"
 #include "common/non_copyable.h"
 #include "network/connection.h"
 
@@ -21,7 +22,7 @@ public:
     using FrameHandler = std::function<void(const Connection::Ptr&, const Frame&)>;
     using IdleTimeoutHandler = std::function<void(ConnectionId)>;
 
-    explicit TcpServer(uint16_t port);
+    explicit TcpServer(const BrokerConfig& config);
     ~TcpServer();
 
     bool Start();
@@ -43,6 +44,7 @@ private:
     void EventLoop();
     void HeartbeatLoop();
 
+    BrokerConfig config_;
     uint16_t port_;
     int listen_fd_ = -1;
     int epoll_fd_ = -1;

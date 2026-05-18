@@ -9,8 +9,8 @@
 
 namespace pmqueue {
 
-Connection::Connection(ConnectionId id, int fd)
-    : id_(id), fd_(fd) {
+Connection::Connection(ConnectionId id, int fd, const BrokerConfig* config)
+    : id_(id), fd_(fd), config_(config) {
     read_buffer_.reserve(4096);
     write_buffer_.reserve(4096);
     UpdateLastActiveTime();
@@ -30,7 +30,8 @@ bool Connection::SendFrame(const Frame& frame) {
     std::lock_guard<std::mutex> lock(write_buffer_mutex_);
 
     // 写缓冲区背压：超过上限则拒绝写入
-    if (write_buffer_.size() + encoded.size() > kMaxWriteBufferSize) {
+    size_t max_write_buffer = (config_ != nullptr) ? config_->max_write_buffer_size : (8 * 1024 * 1024);
+    if (write_buffer_.size() + encoded.size() > max_write_buffer) {
         return false;
     }
 
@@ -134,10 +135,16 @@ std::chrono::steady_clock::time_point Connection::GetLastActiveTime() const {
 }
 
 bool Connection::AcquirePublishPermit(uint32_t tokens) {
+    // 如果限流被禁用，直接放行
+    if (config_ != nullptr && !config_->rate_limit_enabled) {
+        return true;
+    }
+
     std::lock_guard<std::mutex> lock(limiter_mutex_);
     if (!publish_limiter_) {
-        // 默认限流
-        publish_limiter_ = std::make_unique<TokenBucket>(kDefaultConnPublishRate, kDefaultRateLimitBurst);
+        uint32_t rate = (config_ != nullptr) ? config_->conn_publish_rate : 1000;
+        uint32_t burst = (config_ != nullptr) ? config_->rate_limit_burst : 100;
+        publish_limiter_ = std::make_unique<TokenBucket>(rate, burst);
     }
     return publish_limiter_->Acquire(tokens);
 }

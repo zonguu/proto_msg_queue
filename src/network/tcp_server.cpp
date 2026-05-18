@@ -11,7 +11,8 @@
 
 namespace pmqueue {
 
-TcpServer::TcpServer(uint16_t port) : port_(port) {}
+TcpServer::TcpServer(const BrokerConfig& config)
+    : config_(config), port_(config_.port) {}
 
 TcpServer::~TcpServer() {
     Stop();
@@ -68,7 +69,9 @@ bool TcpServer::Start() {
     running_ = true;
     accept_thread_ = std::thread(&TcpServer::AcceptLoop, this);
     event_thread_ = std::thread(&TcpServer::EventLoop, this);
-    heartbeat_thread_ = std::thread(&TcpServer::HeartbeatLoop, this);
+    if (config_.heartbeat_enabled) {
+        heartbeat_thread_ = std::thread(&TcpServer::HeartbeatLoop, this);
+    }
 
     return true;
 }
@@ -149,7 +152,7 @@ void TcpServer::AcceptLoop() {
         ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         ConnectionId conn_id = next_conn_id_.fetch_add(1);
-        auto conn = std::make_shared<Connection>(conn_id, client_fd);
+        auto conn = std::make_shared<Connection>(conn_id, client_fd, &config_);
 
         conn->SetFrameHandler([this](const Connection::Ptr& c, const Frame& frame) {
             if (frame_handler_) {
@@ -208,7 +211,7 @@ void TcpServer::EventLoop() {
 
 void TcpServer::HeartbeatLoop() {
     while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(kHeartbeatCheckIntervalMs));
+        std::this_thread::sleep_for(std::chrono::milliseconds(config_.heartbeat_check_interval_ms));
 
         if (!running_.load()) {
             break;
@@ -226,7 +229,7 @@ void TcpServer::HeartbeatLoop() {
                 }
                 auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - conn->GetLastActiveTime()).count();
-                if (elapsed_ms >= static_cast<int64_t>(kDefaultHeartbeatTimeoutMs)) {
+                if (elapsed_ms >= static_cast<int64_t>(config_.heartbeat_timeout_ms)) {
                     idle_conns.push_back(conn);
                     idle_conn_ids.push_back(id);
                 }

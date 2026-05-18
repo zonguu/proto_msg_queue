@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "common/config.h"
 #include "common/non_copyable.h"
 #include "network/connection.h"
 
@@ -22,7 +23,7 @@ public:
     TcpClient();
     ~TcpClient();
 
-    bool Connect(const std::string& host, uint16_t port);
+    bool Connect(const std::string& host, uint16_t port, const BrokerConfig* config = nullptr);
     void Disconnect();
 
     bool SendFrame(const Frame& frame);
@@ -33,10 +34,11 @@ public:
 private:
     void ReadLoop();
     void PingLoop();
-    void HandlePingPong(const Frame& frame);
 
     std::string host_;
     uint16_t port_ = 0;
+    const BrokerConfig* config_ = nullptr;
+
     mutable std::mutex conn_mutex_;
     Connection::Ptr connection_;
     std::atomic<bool> connected_{false};

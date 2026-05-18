@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "common/config.h"
 #include "common/non_copyable.h"
 #include "common/rate_limiter.h"
 #include "protocol/frame_protocol.h"
@@ -22,7 +23,7 @@ public:
     using FrameHandler = std::function<void(const Ptr&, const Frame&)>;
     using CloseHandler = std::function<void(const Ptr&)>;
 
-    Connection(ConnectionId id, int fd);
+    Connection(ConnectionId id, int fd, const BrokerConfig* config = nullptr);
     ~Connection();
 
     ConnectionId GetId() const { return id_; }
@@ -66,6 +67,9 @@ private:
 
     // 使用毫秒时间戳存储，避免 atomic<time_point> 的兼容性问题
     std::atomic<uint64_t> last_active_time_ms_{0};
+
+    // 配置引用（可能为 nullptr，使用默认值）
+    const BrokerConfig* config_;
 
     // 单连接发布限流
     std::unique_ptr<TokenBucket> publish_limiter_;

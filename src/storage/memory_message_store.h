@@ -41,7 +41,7 @@ public:
         uint32_t max_retry_count = 3,
         uint32_t pending_timeout_ms = 5000,
         uint32_t retry_interval_ms = 1000,
-        uint32_t expiration_check_interval_ms = kDefaultExpirationCheckIntervalMs);
+        uint32_t expiration_check_interval_ms = 10000);
     
     ~MemoryMessageStore() override;
 

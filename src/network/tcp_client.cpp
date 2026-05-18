@@ -17,9 +17,10 @@ TcpClient::~TcpClient() {
     Disconnect();
 }
 
-bool TcpClient::Connect(const std::string& host, uint16_t port) {
+bool TcpClient::Connect(const std::string& host, uint16_t port, const BrokerConfig* config) {
     host_ = host;
     port_ = port;
+    config_ = config;
 
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -48,7 +49,7 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     ConnectionId conn_id = 1;
-    auto conn = std::make_shared<Connection>(conn_id, fd);
+    auto conn = std::make_shared<Connection>(conn_id, fd, config);
     conn->SetFrameHandler([this](const Connection::Ptr&, const Frame& frame) {
         // 先处理心跳
         if (frame.msg_type == FrameMessageType::Ping) {
@@ -61,7 +62,6 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
             auto now = std::chrono::steady_clock::now();
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
             last_pong_time_ms_.store(static_cast<uint64_t>(ms), std::memory_order_relaxed);
-            // 继续传递给用户 handler，以便测试和应用层感知
             if (frame_handler_) {
                 frame_handler_(frame);
             }
@@ -83,7 +83,13 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
 
     connected_ = true;
     read_thread_ = std::thread(&TcpClient::ReadLoop, this);
-    ping_thread_ = std::thread(&TcpClient::PingLoop, this);
+
+    // 根据配置决定是否启动心跳
+    bool heartbeat_enabled = (config_ != nullptr) ? config_->heartbeat_enabled : true;
+    if (heartbeat_enabled) {
+        ping_thread_ = std::thread(&TcpClient::PingLoop, this);
+    }
+
     return true;
 }
 
@@ -142,8 +148,11 @@ void TcpClient::ReadLoop() {
 }
 
 void TcpClient::PingLoop() {
+    uint32_t interval_ms = (config_ != nullptr) ? config_->heartbeat_interval_ms : 5000;
+    uint32_t timeout_ms = (config_ != nullptr) ? config_->heartbeat_timeout_ms : 15000;
+
     while (connected_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultPingIntervalMs));
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
 
         if (!connected_.load()) {
             break;
@@ -160,7 +169,7 @@ void TcpClient::PingLoop() {
         auto now = std::chrono::steady_clock::now();
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         auto last_pong = static_cast<int64_t>(last_pong_time_ms_.load(std::memory_order_relaxed));
-        if (now_ms - last_pong > static_cast<int64_t>(kDefaultHeartbeatTimeoutMs)) {
+        if (now_ms - last_pong > static_cast<int64_t>(timeout_ms)) {
             // 心跳超时，断开连接
             Connection::Ptr conn;
             {

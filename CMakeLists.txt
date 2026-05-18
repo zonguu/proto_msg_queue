@@ -17,6 +17,7 @@ include(cmake/common.cmake)
 find_package(Threads REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(GTest REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Protobuf 生成
 set(PROTO_SRC ${CMAKE_SOURCE_DIR}/src/proto/msg_queue.proto)
@@ -34,6 +35,8 @@ include_directories(
 add_library(pmqueue_core STATIC
     ${PROTO_CPP_SOURCES}
     ${PROTO_CPP_HEADERS}
+    src/common/config.cpp
+    src/common/compression.cpp
     src/ring_buffer/spsc_ring_buffer.cpp
     src/protocol/frame_codec.cpp
     src/storage/memory_message_store.cpp
@@ -47,6 +50,7 @@ add_library(pmqueue_core STATIC
 target_link_libraries(pmqueue_core PUBLIC
     Threads::Threads
     ${Protobuf_LIBRARIES}
+    ZLIB::ZLIB
 )
 
 # === 可执行文件 ===
@@ -56,43 +60,24 @@ target_link_libraries(server_main PRIVATE pmqueue_core)
 add_executable(client_main src/main/client_main.cpp)
 target_link_libraries(client_main PRIVATE pmqueue_core)
 
-# === 测试 ===
+# === 测试（合并为单个 bin）===
 enable_testing()
 
-add_executable(test_ring_buffer test/test_ring_buffer.cpp)
-target_link_libraries(test_ring_buffer PRIVATE pmqueue_core GTest::gtest_main)
+add_executable(test_all
+    test/test_ring_buffer.cpp
+    test/test_frame_codec.cpp
+    test/test_message_store.cpp
+    test/test_topic_manager.cpp
+    test/test_integration.cpp
+    test/test_batch_publish.cpp
+    test/test_heartbeat.cpp
+    test/test_rate_limiter.cpp
+    test/test_ttl.cpp
+    test/test_compression.cpp
+    test/test_config.cpp
+)
 
-add_executable(test_frame_codec test/test_frame_codec.cpp)
-target_link_libraries(test_frame_codec PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_message_store test/test_message_store.cpp)
-target_link_libraries(test_message_store PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_topic_manager test/test_topic_manager.cpp)
-target_link_libraries(test_topic_manager PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_integration test/test_integration.cpp)
-target_link_libraries(test_integration PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_batch_publish test/test_batch_publish.cpp)
-target_link_libraries(test_batch_publish PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_heartbeat test/test_heartbeat.cpp)
-target_link_libraries(test_heartbeat PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_rate_limiter test/test_rate_limiter.cpp)
-target_link_libraries(test_rate_limiter PRIVATE pmqueue_core GTest::gtest_main)
-
-add_executable(test_ttl test/test_ttl.cpp)
-target_link_libraries(test_ttl PRIVATE pmqueue_core GTest::gtest_main)
+target_link_libraries(test_all PRIVATE pmqueue_core GTest::gtest_main)
 
 # 注册测试
-add_test(NAME RingBufferTest COMMAND test_ring_buffer)
-add_test(NAME FrameCodecTest COMMAND test_frame_codec)
-add_test(NAME MessageStoreTest COMMAND test_message_store)
-add_test(NAME TopicManagerTest COMMAND test_topic_manager)
-add_test(NAME IntegrationTest COMMAND test_integration)
-add_test(NAME BatchPublishTest COMMAND test_batch_publish)
-add_test(NAME HeartbeatTest COMMAND test_heartbeat)
-add_test(NAME RateLimiterTest COMMAND test_rate_limiter)
-add_test(NAME TtlTest COMMAND test_ttl)
+add_test(NAME AllTests COMMAND test_all)
