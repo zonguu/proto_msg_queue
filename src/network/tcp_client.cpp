@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
+#include <random>
+#include <sstream>
+#include <iomanip>
 
 namespace pmqueue {
 
@@ -17,10 +20,32 @@ TcpClient::~TcpClient() {
     Disconnect();
 }
 
+namespace {
+std::string GenerateProducerId() {
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint64_t> dis;
+    uint64_t p1 = dis(gen);
+    uint64_t p2 = dis(gen);
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0')
+        << std::setw(8) << (p1 >> 32)
+        << std::setw(4) << ((p1 >> 16) & 0xFFFF)
+        << std::setw(4) << (p1 & 0xFFFF)
+        << std::setw(4) << ((p2 >> 48) & 0xFFFF)
+        << std::setw(12) << (p2 & 0xFFFFFFFFFFFF);
+    return oss.str();
+}
+}
+
 bool TcpClient::Connect(const std::string& host, uint16_t port, const BrokerConfig* config) {
     host_ = host;
     port_ = port;
     config_ = config;
+
+    // 生成唯一的生产者标识
+    producer_id_ = GenerateProducerId();
+    next_sequence_id_.store(1, std::memory_order_relaxed);
 
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -145,6 +170,10 @@ void TcpClient::ReadLoop() {
         conn->OnRead();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+
+uint64_t TcpClient::GetNextSequenceId() {
+    return next_sequence_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TcpClient::PingLoop() {

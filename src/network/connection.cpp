@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <errno.h>
 #include <cstring>
 
@@ -25,38 +26,92 @@ bool Connection::SendFrame(const Frame& frame) {
         return false;
     }
 
-    auto encoded = FrameCodec::Encode(frame);
+    bool use_zero_copy = (config_ != nullptr) ? config_->zero_copy_enabled : true;
 
     std::lock_guard<std::mutex> lock(write_buffer_mutex_);
 
-    // 写缓冲区背压：超过上限则拒绝写入
-    size_t max_write_buffer = (config_ != nullptr) ? config_->max_write_buffer_size : (8 * 1024 * 1024);
-    if (write_buffer_.size() + encoded.size() > max_write_buffer) {
+    // 如果有待发送的缓冲数据，必须先发送完，避免乱序
+    if (!write_buffer_.empty() || !use_zero_copy) {
+        auto encoded = FrameCodec::Encode(frame);
+
+        // 写缓冲区背压：超过上限则拒绝写入
+        size_t max_write_buffer = (config_ != nullptr) ? config_->max_write_buffer_size : (8 * 1024 * 1024);
+        if (write_buffer_.size() + encoded.size() > max_write_buffer) {
+            return false;
+        }
+
+        write_buffer_.insert(write_buffer_.end(), encoded.begin(), encoded.end());
+
+        // 尝试立即发送
+        size_t total_sent = 0;
+        while (total_sent < write_buffer_.size()) {
+            ssize_t sent = ::send(fd_, write_buffer_.data() + total_sent,
+                                  write_buffer_.size() - total_sent, MSG_NOSIGNAL);
+            if (sent > 0) {
+                total_sent += static_cast<size_t>(sent);
+            } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                break;
+            } else {
+                Close();
+                return false;
+            }
+        }
+
+        if (total_sent > 0) {
+            write_buffer_.erase(write_buffer_.begin(), write_buffer_.begin() + total_sent);
+        }
+
+        return true;
+    }
+
+    // === 零拷贝路径：使用 writev 直接发送 header + payload ===
+    uint8_t header[kFrameHeaderSize];
+    size_t header_size = FrameCodec::EncodeHeaderToBuffer(frame, header, sizeof(header));
+    if (header_size == 0) {
         return false;
     }
 
-    write_buffer_.insert(write_buffer_.end(), encoded.begin(), encoded.end());
+    struct iovec iov[2];
+    iov[0].iov_base = header;
+    iov[0].iov_len = header_size;
+    iov[1].iov_base = const_cast<uint8_t*>(frame.payload.data());
+    iov[1].iov_len = frame.payload.size();
 
-    // 尝试立即发送
-    size_t total_sent = 0;
-    while (total_sent < write_buffer_.size()) {
-        ssize_t sent = ::send(fd_, write_buffer_.data() + total_sent,
-                              write_buffer_.size() - total_sent, MSG_NOSIGNAL);
-        if (sent > 0) {
-            total_sent += static_cast<size_t>(sent);
-        } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            break;
-        } else {
-            Close();
-            return false;
+    ssize_t total_to_send = static_cast<ssize_t>(header_size + frame.payload.size());
+    ssize_t sent = ::writev(fd_, iov, 2);
+
+    if (sent == total_to_send) {
+        // 全部发送成功，零拷贝完成
+        return true;
+    } else if (sent > 0) {
+        // 部分发送，将剩余数据拷贝到 write_buffer_
+        size_t remaining_header = (sent < static_cast<ssize_t>(header_size))
+            ? (header_size - static_cast<size_t>(sent))
+            : 0;
+        size_t payload_sent = (sent > static_cast<ssize_t>(header_size))
+            ? (static_cast<size_t>(sent) - header_size)
+            : 0;
+        size_t remaining_payload = frame.payload.size() - payload_sent;
+
+        if (remaining_header > 0) {
+            size_t header_offset = header_size - remaining_header;
+            write_buffer_.insert(write_buffer_.end(), header + header_offset, header + header_size);
         }
+        if (remaining_payload > 0) {
+            write_buffer_.insert(write_buffer_.end(),
+                frame.payload.begin() + payload_sent,
+                frame.payload.end());
+        }
+        return true;
+    } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        // 无法发送任何数据，全部拷贝到 write_buffer_
+        write_buffer_.insert(write_buffer_.end(), header, header + header_size);
+        write_buffer_.insert(write_buffer_.end(), frame.payload.begin(), frame.payload.end());
+        return true;
+    } else {
+        Close();
+        return false;
     }
-
-    if (total_sent > 0) {
-        write_buffer_.erase(write_buffer_.begin(), write_buffer_.begin() + total_sent);
-    }
-
-    return true;
 }
 
 void Connection::OnRead() {

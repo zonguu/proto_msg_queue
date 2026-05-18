@@ -100,6 +100,8 @@ int main(int argc, char* argv[]) {
         req.set_topic(argv[4]);
         req.set_payload(argv[5]);
         if (argc >= 7) req.set_ttl_ms(static_cast<uint32_t>(std::atoi(argv[6])));
+        req.set_producer_id(client.GetProducerId());
+        req.set_sequence_id(client.GetNextSequenceId());
         req.SerializeToString(&data);
         frame.msg_type = pmqueue::FrameMessageType::Publish;
     } else if (cmd == "batch_publish" && argc >= 6) {
@@ -108,6 +110,8 @@ int main(int argc, char* argv[]) {
             auto* msg = batch_req.add_messages();
             msg->set_topic(argv[4]);
             msg->set_payload(argv[i]);
+            msg->set_producer_id(client.GetProducerId());
+            msg->set_sequence_id(client.GetNextSequenceId());
         }
         batch_req.SerializeToString(&data);
         frame.msg_type = pmqueue::FrameMessageType::BatchPublish;

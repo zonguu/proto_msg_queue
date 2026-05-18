@@ -52,6 +52,13 @@ struct BrokerConfig {
     bool compression_enabled = false;
     uint32_t compression_threshold_bytes = 1024;
 
+    // === 零拷贝 ===
+    bool zero_copy_enabled = true;
+
+    // === 消息去重 ===
+    bool dedup_enabled = true;
+    size_t dedup_window_size = 100000;
+
     // === 存储 ===
     size_t default_ring_buffer_size = 1024 * 1024;
     uint32_t max_retry_count = 3;

@@ -36,6 +36,35 @@ std::vector<uint8_t> FrameCodec::Encode(const Frame& frame) {
     return result;
 }
 
+size_t FrameCodec::EncodeHeaderToBuffer(const Frame& frame, uint8_t* buffer, size_t buffer_size) {
+    if (buffer_size < kFrameHeaderSize) {
+        return 0;
+    }
+
+    size_t offset = 0;
+
+    // Magic (4 bytes, big-endian)
+    buffer[offset++] = static_cast<uint8_t>((frame.magic >> 24) & 0xFF);
+    buffer[offset++] = static_cast<uint8_t>((frame.magic >> 16) & 0xFF);
+    buffer[offset++] = static_cast<uint8_t>((frame.magic >> 8) & 0xFF);
+    buffer[offset++] = static_cast<uint8_t>(frame.magic & 0xFF);
+
+    // Version (1 byte)
+    buffer[offset++] = frame.version;
+
+    // Message Type (1 byte)
+    buffer[offset++] = static_cast<uint8_t>(frame.msg_type);
+
+    // Length (4 bytes, big-endian)
+    uint32_t length = static_cast<uint32_t>(frame.payload.size());
+    buffer[offset++] = static_cast<uint8_t>((length >> 24) & 0xFF);
+    buffer[offset++] = static_cast<uint8_t>((length >> 16) & 0xFF);
+    buffer[offset++] = static_cast<uint8_t>((length >> 8) & 0xFF);
+    buffer[offset++] = static_cast<uint8_t>(length & 0xFF);
+
+    return offset;
+}
+
 std::optional<Frame> FrameCodec::TryDecode(const std::vector<uint8_t>& buffer, size_t& consumed_bytes) {
     consumed_bytes = 0;
 

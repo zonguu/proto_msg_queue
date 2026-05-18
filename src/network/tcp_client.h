@@ -31,6 +31,10 @@ public:
 
     void SetFrameHandler(FrameHandler handler) { frame_handler_ = std::move(handler); }
 
+    // 获取生产者标识（用于消息去重）
+    const std::string& GetProducerId() const { return producer_id_; }
+    uint64_t GetNextSequenceId();
+
 private:
     void ReadLoop();
     void PingLoop();
@@ -45,6 +49,9 @@ private:
     std::thread read_thread_;
     std::thread ping_thread_;
     FrameHandler frame_handler_;
+
+    std::string producer_id_;
+    std::atomic<uint64_t> next_sequence_id_{1};
 
     std::atomic<uint64_t> last_pong_time_ms_{0};
 };

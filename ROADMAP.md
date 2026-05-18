@@ -49,7 +49,7 @@
 ### 6. 零拷贝（Zero-Copy）网络发送
 - **重要性**: 🟡 中
 - **难度**: 🟡 中
-- **说明**: 当前 `Connection::SendFrame` 存在多次内存拷贝（encode → write_buffer → send）。可使用 `sendmsg` + `iovec` 将帧头与 payload 直接组合发送，减少拷贝。
+- **说明**: ✅ **已实现**。使用 `writev` + `iovec` 将帧头与 payload 分开发送，避免用户态内的多次内存拷贝。当 socket 缓冲区不足时自动回退到传统缓冲发送模式。可通过配置 `zero_copy_enabled` 开启/关闭。
 - **涉及模块**: `network/connection`, `protocol/frame_codec`
 
 ### 7. 批量读写（Batching）
@@ -97,9 +97,11 @@
 ### 11. 消息去重（Exactly-Once）
 - **重要性**: 🟡 中
 - **难度**: 🔴 高
-- **说明**: 网络重试可能导致消息重复投递。实现方案：
-  - 生产者端幂等序列号（Idempotent Producer）
-  - 服务端维护已处理消息 ID 的布隆过滤器或去重窗口
+- **说明**: ✅ **已实现**。基于幂等生产者模式：
+  - 生产者端：每次连接生成唯一 `producer_id`，自动填充单调递增 `sequence_id`
+  - 服务端：`DedupWindow` 维护每个 producer 的最大已处理 sequence，重复消息直接返回幂等响应
+  - 兼容旧客户端（无 producer_id 时跳过去重）
+  - 可通过配置 `dedup_enabled` 开启/关闭
 - **涉及模块**: `mq/broker`, `storage/`, `network/tcp_client`
 
 ### 12. 配置化与动态 Topic 参数

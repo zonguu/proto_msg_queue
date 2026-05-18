@@ -142,6 +142,14 @@ bool BrokerConfig::LoadFromFile(const std::string& path) {
     uint32_t comp_thresh = 0;
     if (GetVal("compression_threshold_bytes", comp_thresh, ParseUint32)) compression_threshold_bytes = comp_thresh;
 
+    // 零拷贝
+    ParseBool(ExtractValue(json, "zero_copy_enabled"), zero_copy_enabled);
+
+    // 去重
+    ParseBool(ExtractValue(json, "dedup_enabled"), dedup_enabled);
+    size_t dedup_size = 0;
+    if (GetVal("dedup_window_size", dedup_size, ParseSizeT)) dedup_window_size = dedup_size;
+
     // 存储
     size_t ring_size = 0;
     if (GetVal("default_ring_buffer_size", ring_size, ParseSizeT)) default_ring_buffer_size = ring_size;
@@ -178,6 +186,9 @@ bool BrokerConfig::SaveToFile(const std::string& path) const {
     file << "  \"expiration_check_interval_ms\": " << expiration_check_interval_ms << ",\n";
     file << "  \"compression_enabled\": " << (compression_enabled ? "true" : "false") << ",\n";
     file << "  \"compression_threshold_bytes\": " << compression_threshold_bytes << ",\n";
+    file << "  \"zero_copy_enabled\": " << (zero_copy_enabled ? "true" : "false") << ",\n";
+    file << "  \"dedup_enabled\": " << (dedup_enabled ? "true" : "false") << ",\n";
+    file << "  \"dedup_window_size\": " << dedup_window_size << ",\n";
     file << "  \"default_ring_buffer_size\": " << default_ring_buffer_size << ",\n";
     file << "  \"max_retry_count\": " << max_retry_count << ",\n";
     file << "  \"pending_timeout_ms\": " << pending_timeout_ms << ",\n";

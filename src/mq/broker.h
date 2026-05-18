@@ -6,6 +6,7 @@
 
 #include "common/types.h"
 #include "common/config.h"
+#include "common/dedup_window.h"
 #include "common/non_copyable.h"
 #include "common/rate_limiter.h"
 #include "storage/message_store.h"
@@ -71,6 +72,7 @@ private:
     TopicManager topic_manager_;
     TcpServer server_;
     ConfigManager config_manager_;
+    DedupWindow dedup_window_;
 
     // 全局发布限流
     std::unique_ptr<TokenBucket> global_publish_limiter_;

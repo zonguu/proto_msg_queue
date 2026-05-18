@@ -12,6 +12,7 @@ Broker::Broker(std::unique_ptr<IMessageStore> store, const BrokerConfig& config)
     : store_(std::move(store))
     , server_(config)
     , config_manager_(config)
+    , dedup_window_(config.dedup_window_size)
     , global_publish_limiter_(config.rate_limit_enabled
         ? std::make_unique<TokenBucket>(config.global_publish_rate, config.rate_limit_burst)
         : nullptr) {}
@@ -96,6 +97,15 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
     }
 
     const auto& config = config_manager_.GetGlobalConfig();
+
+    // 去重检查
+    if (config.dedup_enabled && !req.producer_id().empty()) {
+        if (dedup_window_.IsDuplicate(req.producer_id(), req.sequence_id())) {
+            // 幂等响应：直接返回成功，不重复处理
+            SendResponse(conn, true, "", req.sequence_id());
+            return;
+        }
+    }
 
     // 单连接限流检查
     if (config.rate_limit_enabled && !conn->AcquirePublishPermit()) {
@@ -196,6 +206,11 @@ void Broker::HandlePublish(const Connection::Ptr& conn, const Frame& frame) {
             push_frame.payload.assign(push_data.begin(), push_data.end());
             server_.SendTo(target_conn_id, push_frame);
         }
+    }
+
+    // 标记去重窗口
+    if (config.dedup_enabled && !req.producer_id().empty()) {
+        dedup_window_.MarkProcessed(req.producer_id(), req.sequence_id());
     }
 
     SendResponse(conn, true, "", msg_id);

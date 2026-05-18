@@ -22,6 +22,10 @@ public:
     // 编码 Frame 为字节流
     static std::vector<uint8_t> Encode(const Frame& frame);
 
+    // 将帧头编码到预分配的缓冲区（用于零拷贝发送）
+    // 返回实际写入的字节数（固定为 kFrameHeaderSize）
+    static size_t EncodeHeaderToBuffer(const Frame& frame, uint8_t* buffer, size_t buffer_size);
+
     // 尝试从缓冲区解码一个 Frame
     // 返回解码后的 Frame，如果数据不足则返回 nullopt
     static std::optional<Frame> TryDecode(const std::vector<uint8_t>& buffer, size_t& consumed_bytes);
