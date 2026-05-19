@@ -66,6 +66,7 @@ target_link_libraries(client_main PRIVATE pmqueue_core)
 enable_testing()
 
 add_executable(test_all
+    test/test_util.cpp
     test/test_ring_buffer.cpp
     test/test_frame_codec.cpp
     test/test_message_store.cpp

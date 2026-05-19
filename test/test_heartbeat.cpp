@@ -3,19 +3,24 @@
 #include <chrono>
 #include <atomic>
 
-#include "mq/broker.h"
-#include "network/tcp_client.h"
-#include "storage/memory_message_store.h"
-#include "protocol/frame_codec.h"
-#include "msg_queue.pb.h"
+#include "test_util.h"
 
 using namespace pmqueue;
 
 class HeartbeatTest : public ::testing::Test {
 protected:
+    BrokerConfig config_;
+    std::unique_ptr<Broker> broker_;
+
     void SetUp() override {
+        // 启用心跳但缩短间隔，加速测试
+        config_.port = AllocateTestPort();
+        config_.heartbeat_enabled = true;
+        config_.heartbeat_interval_ms = 500;
+        config_.heartbeat_timeout_ms = 1500;
+        config_.heartbeat_check_interval_ms = 500;
         auto store = std::make_unique<MemoryMessageStore>(1024 * 1024);
-        broker_ = std::make_unique<Broker>(std::move(store), 19092);
+        broker_ = std::make_unique<Broker>(std::move(store), config_);
         ASSERT_TRUE(broker_->Start());
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -25,13 +30,11 @@ protected:
             broker_->Stop();
         }
     }
-
-    std::unique_ptr<Broker> broker_;
 };
 
 TEST_F(HeartbeatTest, PingPongExchange) {
     TcpClient client;
-    ASSERT_TRUE(client.Connect("127.0.0.1", 19092));
+    ASSERT_TRUE(client.Connect("127.0.0.1", config_.port, &config_));
 
     std::atomic<bool> received_pong{false};
     client.SetFrameHandler([&](const Frame& frame) {
@@ -40,38 +43,25 @@ TEST_F(HeartbeatTest, PingPongExchange) {
         }
     });
 
-    // 客户端自动发 Ping（间隔 5s），等待收到 Pong
-    for (int i = 0; i < 100 && !received_pong.load(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    EXPECT_TRUE(received_pong.load());
+    // 客户端自动发 Ping（间隔 500ms），等待收到 Pong
+    EXPECT_TRUE(WaitFor([&]() { return received_pong.load(); }, 3000));
     client.Disconnect();
 }
 
 TEST_F(HeartbeatTest, SubscriptionCleanupOnDisconnect) {
     TcpClient sub_client;
-    ASSERT_TRUE(sub_client.Connect("127.0.0.1", 19092));
+    ASSERT_TRUE(sub_client.Connect("127.0.0.1", config_.port, &config_));
 
     std::atomic<int> push_count{0};
     sub_client.SetFrameHandler([&](const Frame& frame) {
-        if (frame.msg_type == FrameMessageType::Push || frame.msg_type == FrameMessageType::BatchPush) {
+        if (frame.msg_type == FrameMessageType::Push ||
+            frame.msg_type == FrameMessageType::BatchPush) {
             push_count.fetch_add(1);
         }
     });
 
     // 订阅
-    pmqueue::SubscribeRequest sub_req;
-    sub_req.set_topic("hb_topic");
-    sub_req.set_subscriber_id("hb_sub");
-
-    std::string sub_data;
-    sub_req.SerializeToString(&sub_data);
-    Frame sub_frame;
-    sub_frame.msg_type = FrameMessageType::Subscribe;
-    sub_frame.payload.assign(sub_data.begin(), sub_data.end());
-    sub_client.SendFrame(sub_frame);
-
+    sub_client.SendFrame(BuildSubscribeFrame("hb_topic", "hb_sub"));
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     // 断开订阅客户端
@@ -80,18 +70,8 @@ TEST_F(HeartbeatTest, SubscriptionCleanupOnDisconnect) {
 
     // 发布消息
     TcpClient pub_client;
-    ASSERT_TRUE(pub_client.Connect("127.0.0.1", 19092));
-
-    pmqueue::PublishRequest pub_req;
-    pub_req.set_topic("hb_topic");
-    pub_req.set_payload("after_disconnect");
-
-    std::string pub_data;
-    pub_req.SerializeToString(&pub_data);
-    Frame pub_frame;
-    pub_frame.msg_type = FrameMessageType::Publish;
-    pub_frame.payload.assign(pub_data.begin(), pub_data.end());
-    pub_client.SendFrame(pub_frame);
+    ASSERT_TRUE(pub_client.Connect("127.0.0.1", config_.port, &config_));
+    pub_client.SendFrame(BuildPublishFrame("hb_topic", "after_disconnect"));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
